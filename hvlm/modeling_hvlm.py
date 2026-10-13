@@ -302,13 +302,14 @@ class VisionTower(nn.Module):
 # loss
 # --------------------------------------------------------------------------------------------------
 def _ce_chunk_sum(h, weight, y):
-    return F.cross_entropy(F.linear(h, weight).float(), y, reduction="sum")
+    return F.cross_entropy(F.linear(h, weight), y, reduction="sum")
 
 
 def chunked_cross_entropy(hidden, weight, labels, chunk_size=2048, use_checkpoint=True):
     """Cross-entropy against the tied head without ever holding the full [N, V] logits.
     hidden [N, d], weight [V, d], labels [N] (-100 ignored).  Returns (sum_of_losses, n_valid_tokens).
-    Each chunk is recomputed in backward (checkpoint), so peak logits memory is chunk_size * V."""
+    With use_checkpoint each chunk is recomputed in backward (peak logits memory = chunk_size * V) at the
+    cost of redoing the head matmul; without it every chunk's logits stay alive until their backward."""
     valid = labels != -100
     hidden, labels = hidden[valid], labels[valid]
     n = int(labels.numel())
@@ -352,7 +353,8 @@ class HVLMForConditionalGeneration(PreTrainedModel):
         self.norm = RMSNorm(d, config.rms_norm_eps)
         self.visual = VisionTower(config.vision_config, d)
         self.mtp = nn.ModuleList([MTPModule(config) for _ in range(config.mtp_num_layers)])
-        self.use_checkpoint = False
+        self.use_checkpoint = False        # per-layer activation checkpointing (--grad_ckpt)
+        self.ce_checkpoint = getattr(config, "ce_checkpoint", True)  # recompute the head matmul in the CE
         self.post_init()
 
     # --- HF plumbing -------------------------------------------------------------------------
@@ -455,8 +457,8 @@ class HVLMForConditionalGeneration(PreTrainedModel):
                 hn = hn[:, -logits_to_keep:]
             return HVLMOutput(logits=F.linear(hn, W))
 
-        chunk = self.config.ce_chunk_size
-        s, n = chunked_cross_entropy(hn[:, :-1].reshape(-1, d), W, labels[:, 1:].reshape(-1), chunk)
+        chunk, ce_ckpt = self.config.ce_chunk_size, self.ce_checkpoint
+        s, n = chunked_cross_entropy(hn[:, :-1].reshape(-1, d), W, labels[:, 1:].reshape(-1), chunk, ce_ckpt)
         lm_loss = s / max(n, 1)
         loss, mtp_loss = lm_loss, None
 
@@ -468,7 +470,8 @@ class HVLMForConditionalGeneration(PreTrainedModel):
                 # position t (0 .. T-k-1) fuses prev[t] with the embedding of token t+k, predicts token t+k+1
                 args = (prev[:, :T - k], inputs_embeds[:, k:], cos[:, :T - k], sin[:, :T - k])
                 prev = checkpoint(mod, *args, use_reentrant=False, preserve_rng_state=False) if ckpt else mod(*args)
-                ms, mn = chunked_cross_entropy(prev[:, :-1].reshape(-1, d), W, labels[:, k + 1:].reshape(-1), chunk)
+                ms, mn = chunked_cross_entropy(prev[:, :-1].reshape(-1, d), W,
+                                               labels[:, k + 1:].reshape(-1), chunk, ce_ckpt)
                 losses.append(ms / max(mn, 1))
             if losses:
                 mtp_loss = torch.stack(losses).mean()

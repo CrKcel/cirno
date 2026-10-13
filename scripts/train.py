@@ -1,8 +1,13 @@
 #!/usr/bin/env python
 """Single-GPU trainer for the hybrid VLM.  Designed to stay under ~8 GB:
 
-  * fp32 master weights + AdamW (fp32 states) + bf16 autocast
-  * per-layer activation checkpointing (--no_grad_ckpt to disable)
+  * fp32 master weights + AdamW (fp32 states) + autocast (--precision, default bf16)
+  * flash-linear-attention kernels for the Gated DeltaNet layers (--gdn_impl, default auto)
+  * activation checkpointing only when it is actually needed (--grad_ckpt auto / --ce_ckpt auto probe the
+    configured shape at startup; on an 8 GB card a small micro_batch usually fits without either, and
+    skipping the two recomputes is worth ~1.5x and ~1.14x respectively)
+  * optional torch.compile of the forward (--compile): another ~1.5x, and it cuts activation memory
+    enough to make the checkpoint-free micro_batch sizes fit (see README 2.2)
   * chunked, checkpointed cross-entropy against the tied head (never materialises [tokens, vocab] logits)
   * optional hard cap on the CUDA allocator (--max_mem_gb 8, never above what is currently free) so an
     out-of-budget config fails fast instead of competing with the desktop or OOMing the device.
@@ -13,6 +18,7 @@ Stages (see README):
   sft      : instruction / VQA / text chat data, everything trained    (--stage sft      --mm_data sft.jsonl  --image_root ...)
 """
 import argparse
+import contextlib
 import json
 import math
 import os
@@ -31,13 +37,17 @@ sys.path.insert(0, os.path.dirname(__file__))
 from data import ChatCollator, ChatDataset, PretrainDataset, ValWindows, special_ids  # noqa: E402
 from hvlm.configuration_hvlm import HVLMConfig  # noqa: E402
 from hvlm.data_core import sample_order  # noqa: E402
+from hvlm.gated_delta import fla_available, fla_error, fla_version, resolve_impl  # noqa: E402
 from hvlm.modeling_hvlm import HVLMForConditionalGeneration  # noqa: E402
 
 STAGE_DEFAULTS = {
     #            lr     warmup  seq   mb  accum  train_modules  mtp_weight  vit_lr_mult
-    # micro_batch / grad_accum keep the stage's tokens per step unchanged (pretrain 16*32*1024 =
+    # micro_batch / grad_accum keep the stage's tokens per step unchanged (pretrain 2*256*1024 =
     # 524k, align 8*32*512 = 131k, sft 8*32*1024 = 262k); see README for the measured caps.
-    "pretrain": dict(lr=1e-3, warmup=0.02, seq_len=1024, micro_batch=16, grad_accum=32, train="llm",
+    # pretrain deliberately uses a small micro_batch: with --grad_ckpt auto a micro-batch that fits
+    # without activation checkpointing is worth ~1.5x, and shrinking micro_batch is how you get one
+    # (the optimizer step still sees the same 524k tokens).  See README 2.2.
+    "pretrain": dict(lr=1e-3, warmup=0.02, seq_len=1024, micro_batch=2, grad_accum=256, train="llm",
                      mtp_weight=0.3, vit_lr_mult=1.0),
     "align":    dict(lr=5e-4, warmup=0.05, seq_len=512, micro_batch=8, grad_accum=32, train="vit",
                      mtp_weight=0.0, vit_lr_mult=1.0),
@@ -81,13 +91,31 @@ def parse_args():
     ap.add_argument("--train", default=None, help="modules to train: llm, vit or llm,vit")
     ap.add_argument("--mtp_weight", type=float, default=None)
     ap.add_argument("--mtp_weight_final", type=float, default=None, help="pretrain: switch to this weight for the last --decay_frac")
-    ap.add_argument("--gdn_impl", choices=["torch", "fla"], default="torch")
+    ap.add_argument("--gdn_impl", choices=["auto", "torch", "fla"], default="auto",
+                    help="Gated DeltaNet kernel: auto = flash-linear-attention when it is installed, else pure PyTorch")
+    ap.add_argument("--precision", choices=["auto", "bf16", "fp16", "fp32"], default="auto",
+                    help="autocast dtype; auto = bf16 if the GPU supports it, else fp16 (fp16 adds a GradScaler)")
     # system
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--max_mem_gb", type=float, default=8.0,
                     help="hard cap on this process's CUDA memory, also bounded by what is free at start (0 = off)")
-    ap.add_argument("--no_grad_ckpt", action="store_true")
-    ap.add_argument("--tf32", action="store_true", help="allow TF32 for fp32 matmuls (off by default: the delta-rule core is an fp32 island)")
+    ap.add_argument("--grad_ckpt", choices=["auto", "on", "off"], default="auto",
+                    help="per-layer activation checkpointing: auto = off when a micro-batch of the "
+                         "configured shape fits without it (probed, costs one fwd/bwd), on otherwise")
+    ap.add_argument("--ce_ckpt", choices=["auto", "on", "off"], default="auto",
+                    help="recompute the vocab-head matmul in the CE backward: auto = off when the kept "
+                         "logits fit (worth ~10%%), on otherwise")
+    ap.add_argument("--no_grad_ckpt", action="store_true",
+                    help="deprecated alias for --grad_ckpt off")
+    ap.add_argument("--compile", action="store_true",
+                    help="torch.compile the training forward (Inductor). Measured +48%% on an 8 GB laptop card "
+                         "(it also cuts activation memory by ~35%%, which is what lets --grad_ckpt auto turn "
+                         "checkpointing off at a larger micro_batch). The first step pays a one-off JIT cost "
+                         "(seconds to a minute; cached in TORCHINDUCTOR_CACHE_DIR, default /tmp/torchinductor_*). "
+                         "Falls back to eager if compilation fails")
+    ap.add_argument("--tf32", action="store_true",
+                    help="allow TF32 for fp32 matmuls (off by default: the pure-PyTorch delta-rule core is an "
+                         "fp32 island; harmless with --gdn_impl fla, where that core lives in the Triton kernel)")
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--log_every", type=int, default=10)
@@ -96,11 +124,29 @@ def parse_args():
     ap.add_argument("--save_every", type=int, default=500)
     ap.add_argument("--resume", action="store_true")
     a = ap.parse_args()
+    if a.no_grad_ckpt:  # deprecated alias, kept so old command lines keep working
+        a.grad_ckpt = "off"
     d = STAGE_DEFAULTS[a.stage]
     for k, v in d.items():
         if getattr(a, k, None) is None:
             setattr(a, k, v)
     return a
+
+
+def resolve_precision(name, device):
+    """Pick the autocast dtype for this device.  Returns (dtype or None, human-readable label)."""
+    if name == "fp32":
+        return None, "fp32 (autocast off, fp32 master weights)"
+    if name == "fp16":
+        if device.type != "cuda":
+            raise SystemExit("--precision fp16 needs CUDA (use bf16 or fp32 on CPU)")
+        return torch.float16, "fp16 autocast + GradScaler (fp32 master weights)"
+    if name == "bf16":
+        return torch.bfloat16, "bf16 autocast (fp32 master weights)"
+    # auto: bf16 wherever it is native (Ampere+), fp16 with a GradScaler otherwise
+    if device.type == "cuda" and not torch.cuda.is_bf16_supported():
+        return torch.float16, "fp16 autocast + GradScaler (fp32 master weights; no native bf16 here)"
+    return torch.bfloat16, f"bf16 autocast (fp32 master weights{'; CPU' if device.type != 'cuda' else ''})"
 
 
 def lr_at(step, total, warmup_steps, base, min_ratio, schedule, decay_frac):
@@ -142,6 +188,115 @@ def count(model, trainable=False):
     return sum(p.numel() for p in model.parameters() if (p.requires_grad or not trainable))
 
 
+def probe_batch(model, device, micro_batch, seq_len, stage):
+    """A synthetic batch of exactly the shape the trainer will use, for the memory probe below."""
+    cfg = model.config
+    ids = torch.randint(8, cfg.vocab_size, (micro_batch, seq_len), device=device)
+    batch = dict(input_ids=ids, labels=ids)
+    if stage != "pretrain":  # make the vision tower take part, so its activations count too
+        vc = cfg.vision_config
+        n = vc.num_image_tokens
+        if seq_len < 4 + n + 2:
+            return None
+        ids[:, 2] = cfg.vision_start_token_id
+        ids[:, 3:3 + n] = cfg.image_token_id
+        ids[:, 3 + n] = cfg.vision_end_token_id
+        labels = ids.clone()
+        labels[:, :4 + n] = -100
+        batch = dict(input_ids=ids, labels=labels,
+                     pixel_values=torch.zeros(micro_batch, 3, vc.image_size, vc.image_size, device=device))
+    return batch
+
+
+def probe_step(fwd_model, batch, dtype_ctx, raw_model):
+    """One fwd+bwd of `batch` that leaves no gradients behind.  Raises like a normal training step."""
+    raw_model.zero_grad(set_to_none=True)
+    with dtype_ctx():
+        out = fwd_model(**batch)
+    if out.loss.requires_grad:
+        out.loss.backward()
+    raw_model.zero_grad(set_to_none=True)
+
+
+CKPT_HEADROOM_GB = 0.5  # allocator fragmentation + cuBLAS workspaces + the batch on its way to the GPU
+
+
+def probe_fits(model, fwd_model, device, dtype_ctx, a, budget_gb):
+    """One fwd+bwd of the real training shape; True when its peak leaves CKPT_HEADROOM_GB to spare.
+
+    The AdamW moments (2 fp32 per trainable parameter) do not exist until the first opt.step(), so a
+    stand-in buffer of exactly that size is held during the probe - without it the probe under-reports
+    by ~1.1 GB here and cheerfully approves a micro_batch that OOMs two steps later."""
+    batch = probe_batch(model, device, a.micro_batch, a.seq_len, a.stage)
+    if batch is None:
+        return None, "cannot probe (sequence too short for an image batch)"
+    n = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    torch.cuda.reset_peak_memory_stats()
+    dummy = torch.empty(2 * n, device=device, dtype=torch.float32)
+    try:
+        probe_step(fwd_model, batch, dtype_ctx, model)
+        peak = torch.cuda.max_memory_reserved() / 1024 ** 3
+        why = f"peak {peak:.2f} GB vs {budget_gb:.2f} GB budget"
+        return peak + CKPT_HEADROOM_GB <= budget_gb, why
+    except torch.cuda.OutOfMemoryError:
+        return False, "probe OOM"
+    finally:
+        model.zero_grad(set_to_none=True)
+        del dummy, batch
+        torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+
+
+def _candidates(a):
+    """(grad_ckpt, ce_ckpt) pairs to try, cheapest-first: every "off" is work not repeated in backward.
+
+    Both knobs are pure recompute-for-memory trades, so the only reason to switch either on is that the
+    configured micro_batch otherwise does not fit.  An explicit --grad_ckpt/--ce_ckpt pins that axis."""
+    grads = [False, True] if a.grad_ckpt == "auto" else [a.grad_ckpt == "on"]
+    ces = [False, True] if a.ce_ckpt == "auto" else [a.ce_ckpt == "on"]
+    return sorted(((g, c) for g in grads for c in ces), key=lambda gc: (gc[0], gc[1]))
+
+
+def setup_execution(a, model, device, dtype_ctx, budget_gb):
+    """Pick activation/CE checkpointing and (optionally) torch.compile by probing the real shape.
+
+    Both checkpointing switches are mathematically free but repeat work in the backward pass (whole
+    layers, and the vocab-head matmul), which on a power-limited card is exactly the compute worth not
+    doing.  torch.compile fuses the elementwise chains and drops activation memory by ~35%, so it can
+    turn a micro_batch that needs checkpointing into one that does not - hence probing the compiled
+    graph, not just the eager one.  Each candidate costs one probe (one Inductor trace when compiled)."""
+    fwd_model, compile_msg, compiled = model, "off", False
+    ckpt_on = ce_on = True
+    label = "grad_ckpt on, ce_ckpt on (no CUDA budget to probe against)"
+    for ckpt_on, ce_on in _candidates(a):
+        model.gradient_checkpointing_enable() if ckpt_on else model.gradient_checkpointing_disable()
+        model.ce_checkpoint = ce_on
+        if a.compile and not compiled:
+            try:
+                fwd_model = torch.compile(model, dynamic=False)
+            except Exception as exc:  # pragma: no cover - depends on the local toolchain
+                fwd_model, compile_msg = model, f"unavailable ({type(exc).__name__}: {exc})"
+            else:
+                compiled = True
+        if budget_gb is None:  # CPU: nothing to probe, keep the conservative flags
+            break
+        t0 = time.time()
+        fits, why = probe_fits(model, fwd_model, device, dtype_ctx, a, budget_gb)
+        if compiled:
+            compile_msg = f"on (first step {time.time() - t0:.0f}s, cached afterwards)"
+        label = (f"grad_ckpt {'on' if ckpt_on else 'off'}, ce_ckpt {'on' if ce_on else 'off'} "
+                 f"(auto: {why})")
+        if fits or (ckpt_on and ce_on):  # accepted, or the most conservative candidate anyway
+            break
+    if a.grad_ckpt != "auto":  # an explicit choice wins over whatever the probe picked
+        ckpt_on = a.grad_ckpt == "on"
+    if a.ce_ckpt != "auto":
+        ce_on = a.ce_ckpt == "on"
+    model.gradient_checkpointing_enable() if ckpt_on else model.gradient_checkpointing_disable()
+    model.ce_checkpoint = ce_on
+    return fwd_model, ckpt_on, ce_on, label, compile_msg
+
+
 @torch.no_grad()
 def evaluate(model, loaders, device, dtype_ctx, n_batches):
     model.eval()
@@ -162,12 +317,14 @@ def evaluate(model, loaders, device, dtype_ctx, n_batches):
     return res
 
 
-def save_checkpoint(model, opt, out_dir, tag, step, samples, tokenizer_path=None):
+def save_checkpoint(model, opt, out_dir, tag, step, samples, tokenizer_path=None, scaler=None):
     tmp, dst = os.path.join(out_dir, tag + ".tmp"), os.path.join(out_dir, tag)
     shutil.rmtree(tmp, ignore_errors=True)
     model.save_pretrained(tmp)
     if opt is not None:
-        torch.save(dict(opt=opt.state_dict(), step=step, samples=samples), os.path.join(tmp, "train_state.pt"))
+        torch.save(dict(opt=opt.state_dict(), step=step, samples=samples,
+                        scaler=scaler.state_dict() if scaler is not None else None),
+                   os.path.join(tmp, "train_state.pt"))
     if tokenizer_path:
         from transformers import AutoTokenizer
 
@@ -182,6 +339,7 @@ def main():
     torch.manual_seed(a.seed)
     device = torch.device(a.device)
     cuda = device.type == "cuda"
+    budget_gb = None  # CUDA memory this process may use; drives the checkpointing probe
     if cuda:
         if a.tf32:
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -197,8 +355,17 @@ def main():
         if budget_gb < total_gb:
             torch.cuda.set_per_process_memory_fraction(max(budget_gb / total_gb, 1e-6), dev_idx)
             print(f"CUDA allocator capped at {budget_gb:.2f} GB (device has {total_gb:.2f} GB, {free_gb:.2f} GB free)")
-    ac_dtype = torch.bfloat16
-    dtype_ctx = lambda: torch.autocast(device_type=device.type, dtype=ac_dtype)
+    ac_dtype, precision_label = resolve_precision(a.precision, device)
+    if ac_dtype is None:
+        dtype_ctx = contextlib.nullcontext
+    else:
+        dtype_ctx = lambda: torch.autocast(device_type=device.type, dtype=ac_dtype)  # noqa: E731
+    scaler = torch.amp.GradScaler("cuda") if (ac_dtype is torch.float16 and cuda) else None
+    gdn_impl = resolve_impl(a.gdn_impl, device, strict=True)  # fails fast on an unusable --gdn_impl fla
+    print(f"precision: {precision_label}")
+    print(f"gdn_impl:  {gdn_impl}" + ("" if gdn_impl == a.gdn_impl else f" (--gdn_impl {a.gdn_impl})") + "  ["
+          + (f"flash-linear-attention {fla_version()}]" if fla_available()
+             else f"fla unavailable: {str(fla_error())[:160]}]"))
 
     from transformers import AutoTokenizer
 
@@ -217,16 +384,20 @@ def main():
         cfg = HVLMConfig(**raw)
         model = HVLMForConditionalGeneration(cfg)
     model.config.mtp_loss_weight = a.mtp_weight
+    # The saved config keeps the *request* ("auto" stays portable: a checkpoint must still load and sample
+    # on a machine without flash-linear-attention); the live modules get what this device actually resolved.
     model.config.linear_attn_impl = a.gdn_impl
     for m in model.modules():
         if hasattr(m, "impl"):
-            m.impl = a.gdn_impl
+            m.impl = gdn_impl
     assert len(tok) <= model.config.vocab_size, "tokenizer larger than model vocab"
     model.to(device)
     set_trainable(model, a.train)
-    if not a.no_grad_ckpt:
-        model.gradient_checkpointing_enable()
     model.train()
+    fwd_model, ckpt_on, ce_on, ckpt_label, compile_msg = setup_execution(a, model, device, dtype_ctx, budget_gb)
+    model.config.ce_checkpoint = ce_on  # record it, like the resolved gdn_impl
+    print(f"checkpointing: {ckpt_label}")
+    print(f"torch.compile: {compile_msg}")
     vc = model.config.vision_config
     print(f"params: total {count(model) / 1e6:.1f}M, trainable {count(model, True) / 1e6:.1f}M "
           f"(stage={a.stage}, train={a.train}, mtp_weight={a.mtp_weight})")
@@ -271,6 +442,8 @@ def main():
     if a.resume and os.path.exists(state_path):
         st = torch.load(state_path, map_location="cpu")
         opt.load_state_dict(st["opt"])
+        if scaler is not None and st.get("scaler"):
+            scaler.load_state_dict(st["scaler"])
         start_step, samples = st["step"], st["samples"]
         print(f"resumed at step {start_step}, sample {samples}")
 
@@ -300,9 +473,10 @@ def main():
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             tok_count += batch["input_ids"].numel()
             with dtype_ctx():
-                out = model(**batch)
+                out = fwd_model(**batch)
             if out.loss.requires_grad:  # e.g. align stage with a micro-batch that has no image
-                (out.loss / a.grad_accum).backward()
+                scaled = out.loss / a.grad_accum
+                (scaler.scale(scaled) if scaler is not None else scaled).backward()
             loss_sum += float(out.loss)
             lm_sum += float(out.lm_loss)
             if out.mtp_loss is not None:
@@ -310,17 +484,31 @@ def main():
                 n_mtp += 1
         samples += a.micro_batch * a.grad_accum
         params = [p for p in model.parameters() if p.requires_grad]
+        if scaler is not None:
+            scaler.unscale_(opt)  # grads are still scaled: unscale before clipping / finiteness check
         gnorm = float(torch.nn.utils.clip_grad_norm_(params, a.clip))
         if not math.isfinite(gnorm):
             bad_steps += 1
             opt.zero_grad(set_to_none=True)
-            print(f"step {step}: non-finite gradient norm, step skipped ({bad_steps} so far)")
+            if scaler is not None:
+                # fp16 overflow: halve the loss scale and let the next step retry.  This is routine for the
+                # first few steps (the initial scale of 65536 usually overflows once); only a run of them
+                # means the training itself is broken.
+                scaler.update()
+                print(f"step {step}: fp16 overflow, step skipped, GradScaler scale -> {scaler.get_scale():.0f}")
+            else:
+                print(f"step {step}: non-finite gradient norm, step skipped ({bad_steps} in a row)")
             if bad_steps >= 10:
-                raise RuntimeError("10 non-finite steps - lower the learning rate or check the data")
+                raise RuntimeError("10 consecutive non-finite steps - lower the learning rate or check the data")
             step += 1
             continue
-        opt.step()
+        if scaler is not None:
+            scaler.step(opt)  # also skips the update if an inf/nan slipped through the clip
+            scaler.update()
+        else:
+            opt.step()
         opt.zero_grad(set_to_none=True)
+        bad_steps = 0  # the counter is about *consecutive* failures
         step += 1
 
         if step % a.log_every == 0 or step == total_steps:
@@ -335,14 +523,14 @@ def main():
             log_f.flush()
             t0, tok_count = time.time(), 0
         if val_loaders and (step % a.eval_every == 0 or step == total_steps):
-            res = evaluate(model, val_loaders, device, dtype_ctx, a.eval_batches)
+            res = evaluate(fwd_model, val_loaders, device, dtype_ctx, a.eval_batches)
             print("eval", {k: f"loss {v:.4f} ppl {math.exp(v):.2f}" for k, v in res.items()}, flush=True)
             log_f.write(json.dumps(dict(step=step, eval=res)) + "\n")
             log_f.flush()
         if step % a.save_every == 0 and step < total_steps:
-            save_checkpoint(model, opt, a.out_dir, "last", step, samples)
+            save_checkpoint(model, opt, a.out_dir, "last", step, samples, scaler=scaler)
 
-    save_checkpoint(model, opt, a.out_dir, "last", step, samples)
+    save_checkpoint(model, opt, a.out_dir, "last", step, samples, scaler=scaler)
     save_checkpoint(model, None, a.out_dir, "final", step, samples, tokenizer_path=a.tokenizer)
     print(f"done. final model: {os.path.join(a.out_dir, 'final')}")
 

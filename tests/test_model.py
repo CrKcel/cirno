@@ -11,6 +11,7 @@ import os
 import sys
 import tempfile
 import traceback
+import warnings
 
 import numpy as np
 import torch
@@ -20,7 +21,8 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "tools"))
 
 from hvlm.configuration_hvlm import HVLMConfig  # noqa: E402
-from hvlm.gated_delta import chunk_gated_delta_rule, recurrent_gated_delta_rule  # noqa: E402
+from hvlm.gated_delta import (chunk_gated_delta_rule, fla_available,  # noqa: E402
+                              gated_delta_rule, recurrent_gated_delta_rule, resolve_impl)
 from hvlm.modeling_hvlm import HVLMForConditionalGeneration, chunked_cross_entropy  # noqa: E402
 from hvlm.positions import build_mrope_positions  # noqa: E402
 
@@ -90,6 +92,72 @@ def test_gdn_gradients_match_recurrent():
         grads.append([x.grad for x in xs])
     for i, (ga, gb) in enumerate(zip(*grads)):
         assert torch.allclose(ga, gb, atol=1e-3, rtol=1e-2), (i, (ga - gb).abs().max().item())
+
+
+def test_gdn_impl_dispatch():
+    """`auto` must never ask for fla on CPU / without the package, and must not need CUDA to be importable."""
+    assert resolve_impl("auto", "cpu") == "torch"
+    assert resolve_impl("torch", "cuda") == "torch"
+    assert resolve_impl("recurrent", "cpu") == "recurrent"
+    if not (torch.cuda.is_available() and fla_available()):
+        try:
+            resolve_impl("fla", "cuda", strict=True)
+            raise AssertionError("strict resolve_impl('fla') must refuse when fla/CUDA is unusable")
+        except RuntimeError:
+            pass
+        # ... while the lenient path (what a checkpoint's saved config goes through) degrades to torch.
+        # The warning is emitted once per process, so clear that latch to keep this test deterministic.
+        import hvlm.gated_delta as gd
+
+        gd._FLA_WARNED = False
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            assert resolve_impl("fla", "cpu") == "torch"
+        assert any(issubclass(w.category, RuntimeWarning) for w in caught), "expected a RuntimeWarning"
+    try:
+        resolve_impl("nope", "cpu")
+        raise AssertionError("unknown impl must raise")
+    except ValueError:
+        pass
+    # "auto" on CPU silently lands on the fp32 reference path
+    torch.manual_seed(0)
+    B, T, H, Dk, Dv = 2, 40, 3, 16, 16
+    q, k, v = torch.randn(B, T, H, Dk), torch.randn(B, T, H, Dk), torch.randn(B, T, H, Dv)
+    g, beta = -torch.rand(B, T, H) * 2, torch.rand(B, T, H)
+    a, _ = gated_delta_rule(q, k, v, g, beta, impl="auto", chunk_size=8)
+    b, _ = gated_delta_rule(q, k, v, g, beta, impl="torch", chunk_size=8)
+    assert torch.equal(a, b)
+
+
+def test_fla_matches_torch_impl():
+    """The optional flash-linear-attention kernel must agree with the fp32 reference within bf16 rounding."""
+    if not torch.cuda.is_available():
+        print("    (skipped: no CUDA device)")
+        return
+    if not fla_available():
+        print("    (skipped: fla not installed)")
+        return
+    torch.manual_seed(0)
+    for T, H, Dk, Dv in [(512, 8, 64, 64), (100, 4, 64, 64)]:  # incl. a length that needs chunk padding
+        q, k = torch.randn(2, T, H, Dk, device="cuda"), torch.randn(2, T, H, Dk, device="cuda")
+        v = torch.randn(2, T, H, Dv, device="cuda")
+        g, beta = -torch.rand(2, T, H, device="cuda") * 2, torch.rand(2, T, H, device="cuda")
+        with torch.no_grad():
+            ref, s_ref = gated_delta_rule(q, k, v, g, beta, impl="torch", chunk_size=64)
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                out, s_out = gated_delta_rule(q, k, v, g, beta, impl="fla")
+        assert out.dtype == torch.float32 and s_out.dtype == torch.float32
+        err = (ref - out).abs().max().item()
+        serr = ((s_ref - s_out).abs().max() / s_ref.abs().max().clamp_min(1e-3)).item()
+        assert err < 5e-3, (T, H, Dk, Dv, err)
+        assert serr < 2e-2, (T, H, Dk, Dv, serr)  # the carried state accumulates bf16 rounding over T steps
+        print(f"    fla vs torch (T={T}): out max|diff| {err:.2e}, state rel {serr:.2e}")
+        # gradients must flow through the kernel and stay finite
+        xs = [t.clone().requires_grad_(True) for t in (q[:1], k[:1], v[:1], g[:1], beta[:1])]
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            o, _ = gated_delta_rule(*xs, impl="fla")
+        o.float().pow(2).sum().backward()
+        assert all(x.grad is not None and torch.isfinite(x.grad).all() for x in xs)
 
 
 def test_param_count_matches_estimator():
@@ -288,6 +356,40 @@ def test_init_scales_and_decay_init():
     assert (m.layers[0].input_layernorm.weight == 0).all()
 
 
+def test_ce_checkpoint_only_changes_recompute():
+    """`ce_checkpoint` decides *when* the head matmul is redone, never what the loss/gradient is."""
+    m = tiny_model().train()
+    b = rand_batch(m.config)
+    outs = []
+    for flag in (True, False):
+        m.ce_checkpoint = flag
+        m.zero_grad(set_to_none=True)
+        loss = m(**b).loss
+        loss.backward()
+        outs.append((loss.detach(), {n: p.grad.clone() for n, p in m.named_parameters() if p.grad is not None}))
+    assert torch.allclose(outs[0][0], outs[1][0], atol=1e-6), (outs[0][0], outs[1][0])
+    for n in outs[0][1]:
+        assert torch.allclose(outs[0][1][n], outs[1][1][n], atol=1e-6, rtol=1e-4), n
+    assert HVLMConfig(**FULL).ce_checkpoint is True, "the default must stay memory-conservative"
+
+
+def test_probe_batch_is_a_valid_model_input():
+    """The trainer's memory probe (scripts/train.py) must build a batch the model really accepts -
+    an invalid synthetic batch would make --grad_ckpt auto decide on the wrong shape."""
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    from train import probe_batch
+
+    m = tiny_model()
+    vc = m.config.vision_config
+    b = probe_batch(m, "cpu", 2, 40, "pretrain")
+    assert set(b) == {"input_ids", "labels"} and b["input_ids"].shape == (2, 40)
+    assert probe_batch(m, "cpu", 2, 20, "sft") is None, "a sequence too short for an image must be rejected"
+    b = probe_batch(m, "cpu", 2, 64, "sft")
+    assert (b["input_ids"] == m.config.image_token_id).sum() == 2 * vc.num_image_tokens
+    assert b["pixel_values"].shape == (2, 3, vc.image_size, vc.image_size)
+    assert torch.isfinite(m(**b).loss)
+
+
 def test_generate_simple_runs():
     m = tiny_model()
     b = rand_batch(m.config, with_image=True, B=1)
@@ -324,15 +426,19 @@ def test_gpu_memory_under_8gb():
     m = HVLMForConditionalGeneration(HVLMConfig(**FULL)).cuda().train()
     m.gradient_checkpointing_enable()
     opt = torch.optim.AdamW(m.parameters(), lr=1e-4, fused=True)
+
+    def one_step(mb):  # one fwd/bwd/step; lazy cuBLAS handles and the Triton JIT are warmed below
+        ids = torch.randint(8, 32768, (mb, 2048), device="cuda")
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            loss = m(input_ids=ids, labels=ids).loss
+        loss.backward()
+        opt.step()
+        opt.zero_grad(set_to_none=True)
+
+    one_step(1)  # warm-up, not measured: this is what pays for lazy init / kernel compilation
     for mb in (4, 8):
         torch.cuda.reset_peak_memory_stats()
-        ids = torch.randint(8, 32768, (mb, 2048), device="cuda")
-        for _ in range(2):
-            with torch.autocast("cuda", dtype=torch.bfloat16):
-                loss = m(input_ids=ids, labels=ids).loss
-            loss.backward()
-            opt.step()
-            opt.zero_grad(set_to_none=True)
+        one_step(mb)
         peak = torch.cuda.max_memory_allocated() / 1024 ** 3
         print(f"    micro_batch {mb} x 2048: peak allocated {peak:.2f} GB")
         assert peak < 7.0, f"peak {peak:.2f} GB leaves too little headroom for the CUDA context under 8 GB"

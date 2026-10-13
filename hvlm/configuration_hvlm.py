@@ -75,7 +75,7 @@ class HVLMConfig(_BaseConfig):
         linear_key_head_dim=64,
         linear_value_head_dim=64,
         linear_conv_kernel_dim=4,
-        linear_attn_impl="torch",
+        linear_attn_impl="auto",
         linear_chunk_size=64,
         rms_norm_eps=1e-6,
         max_position_embeddings=4096,
@@ -84,6 +84,7 @@ class HVLMConfig(_BaseConfig):
         mtp_num_layers=1,
         mtp_loss_weight=0.3,
         ce_chunk_size=2048,
+        ce_checkpoint=True,
         image_token_id=5,
         vision_start_token_id=3,
         vision_end_token_id=4,
@@ -120,7 +121,9 @@ class HVLMConfig(_BaseConfig):
         self.linear_key_head_dim = linear_key_head_dim
         self.linear_value_head_dim = linear_value_head_dim
         self.linear_conv_kernel_dim = linear_conv_kernel_dim
-        self.linear_attn_impl = linear_attn_impl  # "torch" (pure PyTorch) or "fla" (flash-linear-attention kernels)
+        # "auto" = fla kernels when they are installed and the input is on CUDA, else pure PyTorch;
+        # see hvlm/gated_delta.py for the full list of accepted values.
+        self.linear_attn_impl = linear_attn_impl
         self.linear_chunk_size = linear_chunk_size
         self.rms_norm_eps = rms_norm_eps
         self.max_position_embeddings = max_position_embeddings
@@ -128,6 +131,9 @@ class HVLMConfig(_BaseConfig):
         self.mtp_num_layers = mtp_num_layers
         self.mtp_loss_weight = mtp_loss_weight
         self.ce_chunk_size = ce_chunk_size
+        # recompute each CE chunk in the backward pass (memory-down / compute-up); the trainer's probe
+        # turns it off when the retained logits fit (see scripts/train.py)
+        self.ce_checkpoint = ce_checkpoint
         self.image_token_id = image_token_id
         self.vision_start_token_id = vision_start_token_id
         self.vision_end_token_id = vision_end_token_id

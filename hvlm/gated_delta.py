@@ -10,10 +10,99 @@ sequential loop over the T/C chunks).  It is a line-by-line twin of the numpy im
 tools/check_algorithms_numpy.py verifies against the recurrence.  `recurrent_gated_delta_rule` is the
 definition itself (slow; used for tests and, with a carried state, for token-by-token decoding).
 
-Inputs are [B, T, H, D] (g and beta: [B, T, H]).  All math is done in float32.
+Inputs are [B, T, H, D] (g and beta: [B, T, H]).  The pure-PyTorch path does all math in float32.
+
+`impl` selects the kernel:
+  "torch"     pure PyTorch, fp32, runs anywhere (CPU/CUDA) - the reference implementation
+  "fla"       flash-linear-attention Triton kernels, CUDA only, needs `pip install flash-linear-attention`
+              (see the note on the two failure modes below)
+  "auto"      fla when it is installed and the inputs are on CUDA, otherwise torch.  If the fla kernel
+              turns out not to support this shape at runtime, auto falls back to torch for the rest of the
+              process (with a warning) instead of crashing.
+  "fla"       honoured when the package and CUDA are there.  Otherwise `resolve_impl(strict=True)` (what
+              the trainer does with --gdn_impl) raises, while the lenient default warns once and uses
+              torch - so a checkpoint whose config says "fla" still loads for CPU inference.  A kernel
+              failure *during* an explicit "fla" run always raises.
+  "recurrent" the definition itself, token by token
+
+With fla the operands are cast to the active autocast dtype (bf16/fp16), which is what makes the kernel
+fast; the observed difference to the fp32 reference is ~1e-3 absolute / ~1e-2 relative, i.e. ordinary
+bf16 rounding.  See README section 2 for the measured throughput.
 """
+import warnings
+
 import torch
 import torch.nn.functional as F
+
+_FLA_FN = None
+_FLA_ERROR = None
+_FLA_PROBED = False
+_FLA_BROKEN = False  # set when an "auto" run hit a kernel-level failure and fell back to torch
+_FLA_WARNED = False  # set once we have warned that "fla" is unusable on this device
+
+
+def _fla_probe():
+    """Import the fla kernel once.  Returns (callable or None, error string or None)."""
+    global _FLA_FN, _FLA_ERROR, _FLA_PROBED
+    if not _FLA_PROBED:
+        _FLA_PROBED = True
+        try:
+            from fla.ops.gated_delta_rule import chunk_gated_delta_rule as fn
+
+            _FLA_FN = fn
+        except Exception as exc:  # pragma: no cover - depends on the environment
+            _FLA_ERROR = f"{type(exc).__name__}: {exc}"
+    return _FLA_FN, _FLA_ERROR
+
+
+def fla_available():
+    """True when the flash-linear-attention kernel can be imported in this environment."""
+    return _fla_probe()[0] is not None
+
+
+def fla_error():
+    """Why fla is unavailable (None when it is available)."""
+    return _fla_probe()[1]
+
+
+def fla_version():
+    try:
+        import fla
+
+        return getattr(fla, "__version__", "unknown")
+    except Exception:  # pragma: no cover
+        return None
+
+
+def resolve_impl(impl="auto", device=None, strict=False):
+    """Map an implementation name to something runnable on `device`.
+
+    "auto" never fails - it just picks the best option.  A request for "fla" that cannot be honoured is an
+    error when `strict` (the trainer validates its own --gdn_impl at startup that way) and a one-time
+    warning plus a torch fallback otherwise (so a checkpoint saved by an fla run still loads on a machine
+    without flash-linear-attention, e.g. CPU inference)."""
+    if impl in ("torch", "recurrent"):
+        return impl
+    if impl not in ("auto", "fla"):
+        raise ValueError(f"unknown gated-delta-rule impl {impl!r} (expected auto/torch/fla/recurrent)")
+    cuda = torch.cuda.is_available() if device is None else torch.device(device).type == "cuda"
+    if impl == "auto":
+        return "fla" if (cuda and fla_available() and not _FLA_BROKEN) else "torch"
+    fn, err = _fla_probe()
+    if fn is None:
+        problem = f"flash-linear-attention is not importable (pip install flash-linear-attention; got {err})"
+    elif not cuda:
+        problem = "flash-linear-attention needs CUDA tensors"
+    else:
+        return "fla"
+    if strict:
+        raise RuntimeError(f"linear_attn_impl='fla' cannot run here: {problem}")
+    global _FLA_WARNED
+    if not _FLA_WARNED:
+        _FLA_WARNED = True
+        warnings.warn(f"linear_attn_impl='fla' cannot run here ({problem}); using the pure-PyTorch gated "
+                      "delta rule instead", RuntimeWarning, stacklevel=2)
+    return "torch"
 
 
 def l2norm(x, eps=1e-6):
@@ -85,21 +174,46 @@ def chunk_gated_delta_rule(q, k, v, g, beta, chunk_size=64, initial_state=None):
     return out.transpose(1, 2), S  # [B,T,H,Dv], [B,H,Dk,Dv]
 
 
-def _fla_chunk(q, k, v, g, beta, initial_state=None):  # optional fast path, needs `pip install flash-linear-attention`
-    from fla.ops.gated_delta_rule import chunk_gated_delta_rule as fla_fn
+def _fla_dtype(x):  # dtype the kernel should run in, given an active autocast region
+    if torch.is_autocast_enabled(x.device.type):
+        d = torch.get_autocast_dtype(x.device.type)
+        # fp32/other autocast dtypes: feed the kernel fp32 rather than guessing
+        return d if d in (torch.bfloat16, torch.float16) else torch.float32
+    return x.dtype if x.dtype in (torch.bfloat16, torch.float16) else torch.float32
 
-    dtype = torch.bfloat16 if q.is_cuda and torch.is_autocast_enabled() else q.dtype
-    o, S = fla_fn(
+
+def _fla_chunk(q, k, v, g, beta, initial_state=None):  # needs `pip install flash-linear-attention`
+    fn, err = _fla_probe()
+    if fn is None:
+        raise RuntimeError(f"flash-linear-attention is not importable ({err})")
+    dtype = _fla_dtype(q)
+    o, S = fn(
         q.to(dtype), k.to(dtype), v.to(dtype), g=g.float(), beta=beta.to(dtype),
-        initial_state=initial_state, output_final_state=True, use_qk_l2norm_in_kernel=True,
+        initial_state=None if initial_state is None else initial_state.to(dtype),
+        output_final_state=True, use_qk_l2norm_in_kernel=True,
     )
-    return o.float(), S
+    return o.float(), S.float()  # fp32 result, like the pure-PyTorch path
 
 
-def gated_delta_rule(q, k, v, g, beta, impl="torch", chunk_size=64, initial_state=None):
+def gated_delta_rule(q, k, v, g, beta, impl="auto", chunk_size=64, initial_state=None):
     """Dispatch.  Returns (out [B,T,H,Dv] float32, final_state [B,H,Dk,Dv])."""
+    global _FLA_BROKEN
+    requested, impl = impl, resolve_impl(impl, q.device)
     if impl == "fla":
-        return _fla_chunk(q, k, v, g, beta, initial_state)
+        try:
+            return _fla_chunk(q, k, v, g, beta, initial_state)
+        except Exception as exc:
+            if requested == "fla":  # explicit request: never silently degrade
+                raise
+            if not _FLA_BROKEN:  # warn once, then stay on the fallback for the rest of the process
+                _FLA_BROKEN = True
+                warnings.warn(
+                    f"flash-linear-attention failed on this shape ({type(exc).__name__}: {exc}); "
+                    "falling back to the pure-PyTorch gated delta rule for the rest of this process "
+                    "(pass --gdn_impl fla to turn this into an error, or --gdn_impl torch to silence it)",
+                    RuntimeWarning, stacklevel=2,
+                )
+            impl = "torch"
     # Autocast would silently turn every fp32 `@` below into a bf16 matmul (the (I+L)^-1 solve and the
     # recurrent state are precision sensitive), so the core always runs with autocast disabled.
     with torch.autocast(device_type=q.device.type, enabled=False):
