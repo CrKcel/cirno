@@ -1,0 +1,9 @@
+torch>=2.4
+transformers>=4.50
+tokenizers
+safetensors
+numpy
+pillow
+pyarrow         # only for parquet sources
+datasets        # only for hf: streaming sources
+# optional fast kernel for Gated DeltaNet:  pip install flash-linear-attention   (then --gdn_impl fla)
