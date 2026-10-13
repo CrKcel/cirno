@@ -1,16 +1,3 @@
-#!/usr/bin/env bash
-# Fast end-to-end smoke test: synthetic data -> tokenizer -> pretrain -> align -> sft -> sample.
-#
-#   bash scripts/smoke_test.sh [work_dir]      # default work dir: data/smoke
-#
-# Target: well under a minute, and it works on CPU.  Everything is deliberately tiny (4 images, 600
-# sentences, 2-3 optimizer steps per stage), and it does NOT pass --compile: the first compiled step
-# costs tens of seconds of Inductor JIT, which is exactly the cost a smoke test exists to avoid
-# (README 2.2 explains when --compile is worth it).
-#
-# Checkpoints are thrown away as soon as the next stage has loaded them (each `last/` carries ~1.6 GB of
-# AdamW state, each `final/` ~0.55 GB of weights), so the peak footprint stays around 1 GB.  Set KEEP=1
-# to keep every stage's output - useful when you want to keep training from one of them.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

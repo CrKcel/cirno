@@ -1,22 +1,4 @@
 #!/usr/bin/env python
-"""Single-GPU trainer for the hybrid VLM.  Designed to stay under ~8 GB:
-
-  * fp32 master weights + AdamW (fp32 states) + autocast (--precision, default bf16)
-  * flash-linear-attention kernels for the Gated DeltaNet layers (--gdn_impl, default auto)
-  * activation checkpointing only when it is actually needed (--grad_ckpt auto / --ce_ckpt auto probe the
-    configured shape at startup; on an 8 GB card a small micro_batch usually fits without either, and
-    skipping the two recomputes is worth ~1.5x and ~1.14x respectively)
-  * optional torch.compile of the forward (--compile): another ~1.5x, and it cuts activation memory
-    enough to make the checkpoint-free micro_batch sizes fit (see README 2.2)
-  * chunked, checkpointed cross-entropy against the tied head (never materialises [tokens, vocab] logits)
-  * optional hard cap on the CUDA allocator (--max_mem_gb 8, never above what is currently free) so an
-    out-of-budget config fails fast instead of competing with the desktop or OOMing the device.
-
-Stages (see README):
-  pretrain : text only, packed windows from prepared token bins        (--stage pretrain --data dirA:0.6,dirB:0.4)
-  align    : image-caption data, ViT + projector trained, LLM frozen   (--stage align    --mm_data caps.jsonl --image_root ...)
-  sft      : instruction / VQA / text chat data, everything trained    (--stage sft      --mm_data sft.jsonl  --image_root ...)
-"""
 import argparse
 import contextlib
 import json
@@ -41,12 +23,6 @@ from hvlm.gated_delta import fla_available, fla_error, fla_version, resolve_impl
 from hvlm.modeling_hvlm import HVLMForConditionalGeneration  # noqa: E402
 
 STAGE_DEFAULTS = {
-    #            lr     warmup  seq   mb  accum  train_modules  mtp_weight  vit_lr_mult
-    # micro_batch / grad_accum keep the stage's tokens per step unchanged (pretrain 2*256*1024 =
-    # 524k, align 8*32*512 = 131k, sft 8*32*1024 = 262k); see README for the measured caps.
-    # pretrain deliberately uses a small micro_batch: with --grad_ckpt auto a micro-batch that fits
-    # without activation checkpointing is worth ~1.5x, and shrinking micro_batch is how you get one
-    # (the optimizer step still sees the same 524k tokens).  See README 2.2.
     "pretrain": dict(lr=1e-3, warmup=0.02, seq_len=1024, micro_batch=2, grad_accum=256, train="llm",
                      mtp_weight=0.3, vit_lr_mult=1.0),
     "align":    dict(lr=5e-4, warmup=0.05, seq_len=512, micro_batch=8, grad_accum=32, train="vit",
@@ -71,10 +47,11 @@ def parse_args():
     # budget
     ap.add_argument("--seq_len", type=int, default=None)
     ap.add_argument("--micro_batch", type=int, default=None,
-                    help="stage defaults: pretrain 16, align 8, sft 8; measured safe max on 8 GB with a "
-                         "desktop running is 24 @seq1024 and 12 @seq2048 (see README, tools/measure_batch.py)")
+                    help="stage defaults: pretrain 2, align 8, sft 8; measured safe max on 8 GB with a "
+                         "desktop running is 24 @seq1024 and 12 @seq2048 (see doc/architecture.md 3.2, "
+                         "tools/measure_batch.py)")
     ap.add_argument("--grad_accum", type=int, default=None,
-                    help="stage defaults: pretrain 32, align 32, sft 32 (mb*accum*seq = 524k/131k/262k tokens per step)")
+                    help="stage defaults: pretrain 256, align 32, sft 32 (mb*accum*seq = 524k/131k/262k tokens per step)")
     ap.add_argument("--max_steps", type=int, default=None)
     ap.add_argument("--tokens", type=float, default=None, help="pretrain: total training tokens (alternative to --max_steps)")
     ap.add_argument("--epochs", type=float, default=None, help="align/sft: number of passes over the data")

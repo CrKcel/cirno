@@ -27,7 +27,7 @@ Inputs are [B, T, H, D] (g and beta: [B, T, H]).  The pure-PyTorch path does all
 
 With fla the operands are cast to the active autocast dtype (bf16/fp16), which is what makes the kernel
 fast; the observed difference to the fp32 reference is ~1e-3 absolute / ~1e-2 relative, i.e. ordinary
-bf16 rounding.  See README section 2 for the measured throughput.
+bf16 rounding.
 """
 import warnings
 

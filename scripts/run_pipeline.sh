@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end recipe.  Edit the DATA section for real corpora; run the smoke test first (see README §6).
+# End-to-end recipe.  Edit the DATA section for real corpora
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,7 +24,7 @@ python scripts/prepare_data.py --tokenizer tokenizer --source "$MATH" --out data
 #    the configured shape once and skip both activation checkpointing and the CE's head-matmul recompute
 #    when they fit (~1.6x together).  micro_batch is therefore kept small: what matters is that a
 #    micro-batch fits WITHOUT checkpointing, and --grad_accum makes up the 524k tokens per step.
-#    Measured on an 8 GB card at 524k tokens/step (README 2.1/2.2, absolute numbers differ per session):
+#    Measured on an 8 GB card at 524k tokens/step (doc/architecture.md 3.2, absolute numbers differ per session):
 #       mb16 x accum32                   6938 tok/s   3.9 GB
 #       mb2  x accum256                  13042 tok/s  5.1 GB   <- this command
 #       mb4  x accum128 --compile        18143 tok/s  5.2 GB   <- what --compile adds (~1.39x)
