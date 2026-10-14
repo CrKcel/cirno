@@ -17,7 +17,7 @@
 | 数据集 | 类型 | 规模 | 取法 | 简介 |
 |---|---|---|---|---|
 | [silver/lccc](https://hf.co/datasets/silver/lccc) | 人类对话 | base 6.8M + large 12M 条 / 1.63 GB parquet | `parquet:hf://datasets/silver/lccc@refs/convert/parquet/base/train/*.parquet:dialog`（large 同理） | 微博闲聊二人会话。`dialog` 是列表，会自动拼成一篇文档；**分词文本，需 `--desegment`**；SFT 也用它 |
-| [chenrm/anime-subtitles](https://hf.co/datasets/chenrm/anime-subtitles) | 人类对话 | 67k 部字幕 / 1.3 GB parquet | `hf:chenrm/anime-subtitles:data:default:train` | 动画字幕，短句口语多。⚠️ `data` 字段是**整份 `.ass` 文件**：含 `[Script Info]` 头、样式定义与时间轴，需要先写一步清洗 |
+| [chenrm/anime-subtitles](https://hf.co/datasets/chenrm/anime-subtitles) | 人类对话 | 67k 部字幕 / 1.3 GB parquet | `hf:chenrm/anime-subtitles:data:default:train`（或本地快照 `parquet:<dir>/data/train-*.parquet:data`） | 动画字幕，短句口语多。⚠️ `data` 字段是**整份 `.ass` 文件**：含 `[Script Info]` 头、样式定义与时间轴，必须先过 `scripts/clean_ass.py --zh-only --t2s`（去标记 / 去日语 / 繁→简，见 [progress.md](progress.md)）。全量 11.43B 原始字符只剩 2.93B 对白 |
 | [Johnson8187/Chinese_Multi-Emotion_Dialogue_Dataset](https://hf.co/datasets/Johnson8187/Chinese_Multi-Emotion_Dialogue_Dataset) | 人类对话 | 4.2k 段对话 | `hf:Johnson8187/Chinese_Multi-Emotion_Dialogue_Dataset:text:default:train` | 日常对话 + 影视对白 + AI 生成混合，自带情绪标签；量小（161 KB parquet），当风格补充。`text` 字段**一行一句**，不是整段会话 |
 | [liwu/MNBVC](https://hf.co/datasets/liwu/MNBVC) `forum`/`blog` | 人类对话 | `forum` 等 18 个子集 | 仅加载脚本，无 parquet 分支 | 论坛对白/博客，是扩 chat 桶最对口的补充。要么把 `datasets` 降到 3.x，要么自己落成本地 parquet/jsonl 再 `jsonl:`/`parquet:` |
 | [wdndev/webnovel-chinese](https://hf.co/datasets/wdndev/webnovel-chinese) | 网文 | 600k 章 / 3.2 GB（作者称约 9B token） | `hf:wdndev/webnovel-chinese:text:default:train` | 网文，字段干净（`title`/`chapter`/`text`） |
