@@ -1,4 +1,5 @@
 """torch Dataset / collate wrappers around hvlm.data_core."""
+import hashlib
 import json
 import os
 import sys
@@ -8,8 +9,51 @@ import torch
 from torch.utils.data import Dataset
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.dirname(__file__))
+from common_io import iter_records  # noqa: E402
 from hvlm.data_core import (TokenMixer, collate_sequences, encode_conversation,  # noqa: E402
                             normalize_messages)
+
+SOURCE_KINDS = ("jsonl", "json", "parquet", "hf")
+
+
+def is_source_spec(source):
+    """True for `hf:...` / `parquet:...` / `jsonl:<glob>` rather than a path to a local jsonl file."""
+    kind, _, rest = source.partition(":")
+    return bool(rest) and kind in SOURCE_KINDS
+
+
+def spool(sources, cache_dir):
+    """Stream remote / glob sources once into a canonical jsonl file.
+
+    ChatDataset needs byte offsets for random access (that is what makes --resume exact), and holding a
+    multi-million-record dataset in memory is not an option, so the records are normalised once into
+    `cache_dir` and reused on later runs."""
+    os.makedirs(cache_dir, exist_ok=True)
+    key = hashlib.sha1("|".join(sources).encode()).hexdigest()[:12]
+    path = os.path.join(cache_dir, f"records-{key}.jsonl")
+    if os.path.exists(path):
+        return path
+    tmp, n, bad = path + ".part", 0, 0
+    with open(tmp, "w", encoding="utf-8") as f:
+        for spec in sources:
+            for rec in iter_records(spec):
+                try:
+                    rec = dict(rec)
+                    msgs = normalize_messages(rec)
+                    if not any(m["role"] == "self" for m in msgs):
+                        raise ValueError("no 'self' turn: nothing to train on")
+                except Exception:  # unknown role / unrecognised shape: not a usable training sample
+                    bad += 1
+                    continue
+                out = {"messages": msgs}
+                if rec.get("image"):
+                    out["image"] = rec["image"]
+                f.write(json.dumps(out, ensure_ascii=False) + "\n")
+                n += 1
+    os.replace(tmp, path)
+    print(f"cached {n} records ({bad} unusable) from {len(sources)} source(s) -> {path}")
+    return path
 
 
 class PretrainDataset(Dataset):
@@ -54,12 +98,17 @@ def load_image(path, size):
 
 
 class ChatDataset(Dataset):
-    """jsonl records: {"image": "rel/path.jpg" (optional), "conversations": [...]} or {"messages": [...]}.
-    Images are loaded lazily; unusable records (missing image, truncated image block, ...) are skipped by
-    falling through to the next record."""
+    """Chat records: {"messages": [{"role","content"}], "image": "rel/path.jpg" (optional)}.
 
-    def __init__(self, jsonl_paths, image_root, tokenizer, max_len, vision_cfg, token_ids):
-        self.files = list(jsonl_paths)
+    Local jsonl files are read in place; remote / glob sources (`hf:`, `parquet:`, `jsonl:<glob>`, see
+    common_io.py) are spooled into `cache_dir` first.  Images are loaded lazily; unusable records (unknown
+    role, missing image, truncated image block, ...) are skipped by falling through to the next record."""
+
+    def __init__(self, sources, image_root, tokenizer, max_len, vision_cfg, token_ids, cache_dir="data/cache"):
+        self.files = [s for s in sources if not is_source_spec(s)]
+        specs = [s for s in sources if is_source_spec(s)]
+        if specs:
+            self.files.append(spool(specs, cache_dir))
         self.offsets = []  # (file index, byte offset)
         for fi, p in enumerate(self.files):
             with open(p, "rb") as f:

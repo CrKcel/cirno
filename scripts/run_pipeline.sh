@@ -4,7 +4,16 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# ---------------- DATA (examples; replace with your own sources) ----------------
+# ---------------- DATA (placeholders; doc/datasets.md lists the open datasets that fill each bucket) -----
+# Each variable is a source spec, so a Hub dataset can be dropped in as-is - no local jsonl needed:
+#   CHAT     hf:silver/lccc:-:base:train                              # human-to-human chat (MIT)
+#   CHAT     hf:chenrm/anime-subtitles:data:default:train             # spoken-style subtitles
+#   CHAT     hf:liwu/MNBVC:主题+回复.回复:forum:train                   # forum threads (MIT)
+#   FICTION  hf:wdndev/webnovel-chinese:text:default:train            # web novels (apache-2.0)
+#   ROLEPLAY hf:shibing624/roleplay-zh-sharegpt-gpt4-data:-:sharegpt_formatted_data-evol-gpt4:train
+#   WIKI     hf:wikimedia/wikipedia:text:20231101.zh:train            # general knowledge (CC-BY-SA)
+# This project is non-commercial, so the NC-licensed sets are fine to use; doc/datasets.md §6 lists
+# which sets have no licence at all - those are the ones worth double-checking before publishing.
 CHAT="jsonl:data/chat/*.jsonl:text"          # human-to-human chat / forum / subtitles
 FICTION="jsonl:data/fiction/*.jsonl:text"    # novels / scripts (dialogue-heavy)
 ROLEPLAY="jsonl:data/roleplay/*.jsonl:text"  # persona cards + multi-turn role-play
@@ -42,12 +51,17 @@ python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pr
 #    chat screenshots).  LLM frozen, ViT + projector learn from IN-CONVERSATION images, not academic
 #    VQA captions - VQA data pulls the model back towards assistant behaviour.  Skip this stage for a
 #    text-only chat model and point step 4 at runs/pretrain/final instead.
+#    PhotoChat / chat-screenshot sets (doc/datasets.md §3) keep their images inside the dataset, so they
+#    still have to be exported to --image_root by hand; this line expects an already-written jsonl.
 python scripts/train.py --stage align --tokenizer tokenizer --init_from runs/pretrain/final --out_dir runs/align \
     --mm_data data/mm/chat_image.jsonl --image_root data/mm/images --epochs 1 --micro_batch 8 --grad_accum 32 --resume
 
 # 4. dialogue / role-play SFT: human-to-human conversations + personas + a small out-of-scope refusal
 #    set ("I don't know, ask an AI").  Only the imitated side (the `self` role in the encoder)
 #    is scored; `--train llm` matches the text-only path (use runs/pretrain/final if step 3 was skipped).
+#    --mm_data takes source specs too, and remote ones are spooled into --mm_cache (data/cache) once:
+#      --mm_data "hf:silver/lccc:-:base:train,hf:shibing624/roleplay-zh-sharegpt-gpt4-data:-:sharegpt_formatted_data-evol-gpt4:train,hf:Johnson8187/role-play-chinese:-:default:train"
+#    The refusal slice (2-8%) has no off-the-shelf source: write it yourself per doc/training.md 4.4.
 python scripts/train.py --stage sft --tokenizer tokenizer --init_from runs/align/final --out_dir runs/sft \
     --train llm --mm_data data/sft/human_dialog.jsonl,data/sft/persona.jsonl,data/sft/refuse.jsonl --epochs 2 \
     --micro_batch 8 --grad_accum 16 --resume

@@ -415,6 +415,32 @@ def test_tiny_overfit_learns():
     print(f"    overfit: {first:.2f} -> {loss.item():.2f}")
 
 
+def test_chat_dataset_reads_source_specs():
+    """--mm_data takes source specs, not just local jsonl: a Hub-shaped record is spooled and encoded."""
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    from data import ChatDataset  # noqa: E402
+
+    class Tok:  # character ids are enough: this test is about the record plumbing, not the tokenizer
+        def __call__(self, s, add_special_tokens=False):
+            return {"input_ids": [10 + (ord(c) % 50) for c in s]}
+
+        def convert_tokens_to_ids(self, t):
+            return 99
+
+    vc = tiny_config().vision_config
+    sp = dict(im_start=1, im_end=2, vision_start=3, vision_end=4, image_pad=5)
+    with tempfile.TemporaryDirectory() as td:
+        src = os.path.join(td, "lccc.jsonl")
+        with open(src, "w", encoding="utf-8") as f:  # LCCC's on-Hub shape: one "dialog" list per line
+            f.write(json.dumps({"dialog": ["在吗", "在的咋啦"]}, ensure_ascii=False) + "\n")
+            f.write(json.dumps({"dialog": ["吃了吗", "刚吃完"]}, ensure_ascii=False) + "\n")
+            f.write(json.dumps({"dialog": ["你好"]}, ensure_ascii=False) + "\n")  # one turn only: unusable
+        ds = ChatDataset([f"jsonl:{src}:-"], ".", Tok(), 128, vc, sp, cache_dir=os.path.join(td, "cache"))
+        assert len(ds) == 2, len(ds)  # the single-turn record is dropped, the two usable ones survive
+        ids, labels, img = ds[0]
+        assert img is None and len(ids) == len(labels) and any(l != -100 for l in labels)
+
+
 def test_gpu_memory_under_8gb():
     if not torch.cuda.is_available():
         print("    (skipped: no CUDA device)")

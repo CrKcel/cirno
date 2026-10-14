@@ -18,7 +18,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.dirname(__file__))
-from common_io import iter_texts  # noqa: E402
+from common_io import iter_texts, split_limit  # noqa: E402
 
 SPECIALS = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|vision_start|>", "<|vision_end|>",
             "<|image_pad|>", "<|pad|>"] + [f"<|reserved_{i}|>" for i in range(9)]
@@ -58,8 +58,8 @@ def main():
     def corpus():
         iters = []
         for s in args.source:
-            spec, _, lim = s.partition("@") if "@" in s.rsplit(":", 1)[-1] else (s, "", "")
-            iters.append(iter_texts(spec, int(lim) if lim else None))
+            spec, max_docs = split_limit(s)
+            iters.append(iter_texts(spec, max_docs))
         # round-robin so every language contributes evenly while the trainer streams
         for batch in zip(*[iter(it) for it in iters]):
             yield from batch

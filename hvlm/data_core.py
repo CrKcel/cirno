@@ -69,21 +69,92 @@ class TokenMixer:
 # chat / multimodal formatting
 # ----------------------------------------------------------------------------------------------
 # The imitated speaker is role "self": the model is a human chat partner, not an assistant.  "gpt" (LLaVA)
-# and "self" are the accepted input spellings;
+# and "self" are the accepted input spellings; anything else - notably "assistant" - is rejected and the
+# record is dropped as a bad sample.
 ROLE_MAP = {"human": "user", "user": "user", "gpt": "self", "self": "self", "system": "system"}
+
+# Column names the same content ships under in the wild (see doc/training.md 4.1).  Mapping them here is
+# what lets a Hugging Face dataset be pointed at directly instead of being converted first.
+_TURNS = ("messages", "conversations")                      # already turn-structured
+_UTTERANCES = ("dialog", "dialogue", "utterances")          # one conversation as a flat list of lines
+_PERSONA = ("system_prompt", "persona", "personality", "system")
+_PROMPTS = ("instruction", "question", "prompt", "INSTRUCTION", "问")
+_REPLIES = ("output", "answer", "response", "utterance", "RESPONSE", "答")
+# Side info to glue onto the prompt.  "context" is deliberately NOT here: EmpatheticDialogues (and others)
+# use that column for an emotion *label*, so gluing it on would inject "sentimental" into the user turn.
+_INPUTS = ("input",)
+
+
+def _as_text(v):
+    if isinstance(v, (list, tuple)):
+        return "\n".join(str(x) for x in v)
+    return v if isinstance(v, str) else str(v)
+
+
+def _first(rec, keys):
+    for k in keys:
+        if rec.get(k):
+            return _as_text(rec[k])
+    return None
+
+
+def _from_utterances(utts, speakers):
+    """A flat utterance list is one conversation: whoever opens is the prompt, the other side is self."""
+    if isinstance(speakers, (list, tuple)) and len(speakers) == len(utts):
+        first = speakers[0]
+        return [{"role": "user" if spk == first else "self", "content": _as_text(u)}
+                for spk, u in zip(speakers, utts)]
+    return [{"role": "user" if i % 2 == 0 else "self", "content": _as_text(u)} for i, u in enumerate(utts)]
 
 
 def normalize_messages(rec):
-    """Accepts {"conversations":[{"from","value"}]} (LLaVA) or {"messages":[{"role","content"}]} (OpenAI)."""
-    turns = rec.get("messages") or rec.get("conversations")
-    if not turns:
-        raise ValueError("record has neither 'messages' nor 'conversations'")
-    out = []
-    for t in turns:
-        role = ROLE_MAP[t.get("role") or t.get("from")]
-        content = t.get("content") if "content" in t else t.get("value")
-        out.append({"role": role, "content": content or ""})
-    return out
+    """Map one record onto [{"role","content"}] with role in {system, user, self}.
+
+    Native shapes: {"conversations":[{"from","value"}]} (LLaVA) / {"messages":[{"role","content"}]} (OpenAI).
+    The shapes Hugging Face dialogue sets actually ship are accepted too, so no conversion step is needed:
+      * a flat utterance list under "dialog"/"dialogue"/"utterances" (LCCC, SODA, DailyDialog), optionally
+        with a parallel "speakers" list; turns alternate and the opener is the prompt;
+      * a persona ("system"/"system_prompt"/"persona") plus an "instruction"/"input" -> "output" pair, or
+        the "question"/"answer" spelling;
+      * PersonaChat dumps: "personality" + "history" + "candidates" (the last candidate is the true reply).
+    """
+    turns = next((rec[k] for k in _TURNS if rec.get(k)), None)
+    if turns:
+        out = []
+        first = str(turns[0].get("role") or turns[0].get("from") or "").lower()
+        persona = _first(rec, _PERSONA) if first != "system" else None
+        if persona:
+            out.append({"role": "system", "content": persona})
+        for t in turns:
+            name = str(t.get("role") or t.get("from")).lower()
+            if name not in ROLE_MAP:
+                raise ValueError(f"unknown chat role '{name}': the imitated side must be spelled self/gpt/human")
+            content = t.get("content") if "content" in t else t.get("value")
+            out.append({"role": ROLE_MAP[name], "content": content or ""})
+        return out
+
+    utts = next((rec[k] for k in _UTTERANCES if isinstance(rec.get(k), (list, tuple)) and rec[k]), None)
+    if utts:
+        return _from_utterances(list(utts), rec.get("speakers"))
+
+    if rec.get("history") and rec.get("candidates"):  # PersonaChat: persona + history + true reply candidates
+        persona = _first(rec, _PERSONA)
+        out = [{"role": "system", "content": persona}] if persona else []
+        out += [{"role": "user", "content": _as_text(rec["history"][-1])},
+                {"role": "self", "content": _as_text(rec["candidates"][-1])}]
+        return out
+
+    prompt, reply = _first(rec, _PROMPTS), _first(rec, _REPLIES)
+    if reply:
+        persona = _first(rec, _PERSONA)
+        out = [{"role": "system", "content": persona}] if persona else []
+        user = "\n".join(x for x in (prompt, _first(rec, _INPUTS)) if x)
+        if user:
+            out.append({"role": "user", "content": user})
+        out.append({"role": "self", "content": reply})
+        return out
+
+    raise ValueError("record has neither 'messages' nor 'conversations' nor a known prompt/reply pair")
 
 
 def encode_conversation(encode, sp, messages, n_img_tokens, has_image, max_len):

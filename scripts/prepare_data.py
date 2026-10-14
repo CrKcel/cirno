@@ -4,6 +4,11 @@
     python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/fineweb_edu \
         --source "hf:HuggingFaceFW/fineweb-edu:text:sample-10BT:train" --max_tokens 1200000000 --val_tokens 4000000
 
+`--source` takes any source spec from common_io.py (jsonl / parquet / txt / hf, with the `-`, `a.b` and
+`a+b` field forms) and may be suffixed with `@N` to use only the first N documents, e.g.
+    --source "hf:silver/lccc:-:base:train@2000000"        # LCCC conversations as whole documents
+    --source "hf:liwu/MNBVC:主题+回复.回复:forum:train"     # forum threads: title + replies
+
 Output directory: train_0000.bin, train_0001.bin, ... (about --shard_tokens each), val.bin and meta.json.
 Run it once per data source (English / Chinese / code / math ...) and mix them at training time with
 `train.py --data dir_a:0.5,dir_b:0.3,...` - mixing weights can then be changed without re-tokenising.
@@ -17,13 +22,13 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
-from common_io import iter_texts  # noqa: E402
+from common_io import iter_texts, split_limit  # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tokenizer", required=True)
-    ap.add_argument("--source", required=True)
+    ap.add_argument("--source", required=True, help="source spec (see common_io.py), optionally suffixed with @max_docs")
     ap.add_argument("--out", required=True)
     ap.add_argument("--max_tokens", type=int, default=None)
     ap.add_argument("--val_tokens", type=int, default=0, help="the first N tokens go to val.bin")
@@ -31,6 +36,7 @@ def main():
     ap.add_argument("--batch_docs", type=int, default=512)
     ap.add_argument("--max_doc_chars", type=int, default=200_000)
     args = ap.parse_args()
+    spec, max_docs = split_limit(args.source)
 
     from transformers import AutoTokenizer
 
@@ -80,7 +86,7 @@ def main():
         write(np.asarray(out, dtype=np.int64))
         buf = []
 
-    for text in iter_texts(args.source):
+    for text in iter_texts(spec, max_docs):
         buf.append(text[: args.max_doc_chars])
         n_docs += 1
         if len(buf) >= args.batch_docs:

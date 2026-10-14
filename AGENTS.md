@@ -17,7 +17,8 @@ in Python/PyTorch, positioned as an **on-device chat / role-play model** rather 
   gitignored.
 - `doc/` — the long-form docs: `architecture.md` (model design, parameter count, memory and
   throughput, precision/kernel choices), `training.md` (design positioning, the three training
-  stages, data prep, evaluation, edge inference, training flags), `progress.md` (what is done, known
+  stages, data prep, evaluation, edge inference, training flags), `datasets.md` (which open datasets
+  each stage points at, their source specs, licences and caveats), `progress.md` (what is done, known
   limitations, TODO). Keep them in sync with the code.
 
 `hvlm/__init__.py` loads model classes lazily; keep torch imports out of `positions.py` and

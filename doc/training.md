@@ -83,6 +83,8 @@
   ```
 
   或 `{"conversations": [{"from": "human", "value": "..."}, {"from": "gpt", "value": "..."}]}`。
+  `normalize_messages` 还认开源对话集实际使用的几种形状，直接指向 HF 数据集时不必先转换：
+  整段对话放在一个列表里的（LCCC / DailyDialog 的 `dialog`、SODA 的 `dialogue`，配套 `speakers` 时按说话人判断谁是被模仿方，否则按轮流交替）、`instruction`/`input` → `output` 这类字段对（外加可选的`system` / `system_prompt` 人设）、以及 PersonaChat 的 `personality` + `history` + `candidates`（最后一条 candidate 为真实回复）。
 - **掩码**：编码器只对 `self` 角色的 token（含其 `<|im_end|>`）计损失，其余上下文只作为条件。
   在人类对话数据里，"`self`"表示**要被模仿的那一方**——把目标说话人标成 `self`（LLaVA 格式的 `gpt`映射到它），对方标成 `user`。输入角色写成 `assistant` 会被拒绝，该记录会被当作坏样本跳过。想同时学会扮演两个方向，就给同一段对话生成两条记录（A→B、B→A），而不是取消掩码。
 - **人设**：身份预设写在首条 `system`，不计损失。**没有预设时**，模型只能从
@@ -128,9 +130,19 @@
 python scripts/train_tokenizer.py --out tokenizer \
     --source "jsonl:data/chat/*.jsonl:text@300000" --source "jsonl:data/wiki/*.jsonl:text@100000"
 
-# 1. 每个来源单独 tokenize，训练时再用权重混合，改配比不必重新 tokenize
-python scripts/prepare_data.py --tokenizer tokenizer --source "jsonl:data/chat/*.jsonl:text" \
-    --out data/bin/chat --max_tokens 1500000000 --val_tokens 4000000
+# 1. 每个来源单独 tokenize，训练时再用权重混合，改配比不必重新 tokenize。
+#    §2 的四桶都能直接在 HF 上取，列表型字段会自动拼成一篇文档，不需要先落地成本地 jsonl：
+python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/chat --max_tokens 1500000000 --val_tokens 4000000 \
+    --source "hf:silver/lccc:-:base:train@6000000"                  # 人类对话（可再并入字幕/论坛）
+python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/fiction --max_tokens 600000000 \
+    --source "hf:wdndev/webnovel-chinese:text:default:train"        # 网文
+python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/roleplay --max_tokens 400000000 \
+    --source "hf:shibing624/roleplay-zh-sharegpt-gpt4-data:-:sharegpt_formatted_data-evol-gpt4:train"
+python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/wiki --max_tokens 400000000 \
+    --source "hf:wikimedia/wikipedia:text:20231101.zh:train"        # 通识
+# 口语对白可以直接并进 chat 桶，例如
+python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/subtitles --max_tokens 300000000 \
+    --source "hf:chenrm/anime-subtitles:data:default:train"
 
 # 2. 预训练
 python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
@@ -147,13 +159,28 @@ python scripts/train.py --stage sft --tokenizer tokenizer \
     --init_from runs/align/final --out_dir runs/sft --train llm \
     --mm_data data/sft/human_dialog.jsonl,data/sft/persona.jsonl,data/sft/refuse.jsonl \
     --epochs 2 --lr 2e-4 --resume
+
+# 同一个 SFT 阶段也可以直接吃 HF 数据源，不用先落 jsonl：
+python scripts/train.py --stage sft --tokenizer tokenizer \
+    --init_from runs/pretrain/final --out_dir runs/sft --train llm --epochs 2 --lr 2e-4 --resume \
+    --mm_data "hf:silver/lccc:-:base:train,hf:shibing624/roleplay-zh-sharegpt-gpt4-data:-:sharegpt_formatted_data-evol-gpt4:train"
 ```
 
-- `--source` 支持 `hf:`（流式 datasets）、`jsonl:`、`parquet:` 等来源，末尾 `@N` 限制文档数；
-  文档之间用 `<|endoftext|>` 分隔，产物是扁平 uint16 token 流 + `meta.json`。
+- `--source` 支持 `hf:`（流式 datasets）、`jsonl:`、`parquet:`、`txt:`，末尾 `@N` 限制文档数；字段按
+  `<数据集>:<字段>` 给出，`-` 表示整条记录，`a.b` 走嵌套路径，`a+b` 按顺序拼接（见 `scripts/common_io.py`
+  的模块 docstring；[datasets.md §1](datasets.md) 给了每个候选集的现成写法）。列表型字段（LCCC 的
+  `dialog`、MNBVC 的 `回复`）会自动用换行拼接成一篇文档，所以不需要先写转换脚本；没有字段名时可先用
+  `-` 取整条记录。文档之间用 `<|endoftext|>` 分隔，产物是扁平 uint16 token 流 + `meta.json`。带下载
+  脚本的老数据集（MNBVC、DailyDialog）流式读取时会把该 config 先整个下载下来，`@N` 只限制喂进 tokenizer
+  的文档数、不省下载。
 - `--val_tokens` 会把前 N 个 token 切给 `val.bin`；训练时定期在验证集上打印 `loss` / `ppl`。对话模型的
   ppl 只能当作"没训崩"的 sanity check，选型看 §6。
-- `--mm_data` 可以只给纯文本 jsonl；只有带 `"image"` 字段的记录才需要 `--image_root`。
+- `--mm_data` 用逗号分隔，每一项既可以是本地 jsonl 路径，也可以是 `hf:` / `parquet:` / `jsonl:<glob>`
+  这类来源；远程来源会先流式过一遍 `normalize_messages`，落到 `--mm_cache`（默认 `data/cache`，可复用）
+  的一个 jsonl 里再训练，这样 `Dataset` 仍按字节偏移随机读、`--resume` 精确，也不会把整个数据集塞进内存。
+  无法映射成 user/self 的记录（角色写成 `assistant`、只有一轮没有回复、字段认不出来）在落盘和读取时都会
+  被跳过。注意 `--mm_data` 里的来源是**先下载一遍**才开训，第一次启动会等得比较久。
+- 只有带 `"image"` 字段的记录才需要 `--image_root`；纯文本 SFT 不用给。
 
 ## 6. 评测
 

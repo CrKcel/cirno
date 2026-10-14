@@ -41,9 +41,12 @@ def parse_args():
     ap.add_argument("--out_dir", required=True)
     # data
     ap.add_argument("--data", default=None, help="pretrain: dir:weight,dir:weight  (dirs from prepare_data.py)")
-    ap.add_argument("--mm_data", default=None, help="align/sft: comma-separated jsonl files")
+    ap.add_argument("--mm_data", default=None, help="align/sft: comma-separated jsonl files and/or source "
+                                                   "specs (hf:..., parquet:..., jsonl:<glob>; see doc/training.md 5)")
     ap.add_argument("--image_root", default=".")
-    ap.add_argument("--val_mm_data", default=None, help="optional jsonl for validation in align/sft")
+    ap.add_argument("--val_mm_data", default=None, help="optional jsonl/spec for validation in align/sft")
+    ap.add_argument("--mm_cache", default="data/cache",
+                    help="where remote --mm_data sources are spooled as jsonl (reused on later runs)")
     # budget
     ap.add_argument("--seq_len", type=int, default=None)
     ap.add_argument("--micro_batch", type=int, default=None,
@@ -398,14 +401,14 @@ def main():
                     ValWindows(vp, S), batch_size=a.micro_batch, shuffle=False, num_workers=0,
                     collate_fn=lambda b: dict(input_ids=torch.stack(b), labels=torch.stack(b)))
     else:
-        assert a.mm_data, "--mm_data file.jsonl[,file2.jsonl] is required for align/sft"
+        assert a.mm_data, "--mm_data file.jsonl|spec[,...] is required for align/sft"
         sp = special_ids(tok)
-        ds = ChatDataset(a.mm_data.split(","), a.image_root, tok, S, vc, sp)
+        ds = ChatDataset(a.mm_data.split(","), a.image_root, tok, S, vc, sp, a.mm_cache)
         collate = ChatCollator(tok.convert_tokens_to_ids("<|pad|>"), sp["image_pad"], vc.merged_grid_size)
         per_step = a.micro_batch * a.grad_accum
         total_steps = a.max_steps or int((a.epochs or 1.0) * len(ds) / per_step)
         if a.val_mm_data:
-            vds = ChatDataset(a.val_mm_data.split(","), a.image_root, tok, S, vc, sp)
+            vds = ChatDataset(a.val_mm_data.split(","), a.image_root, tok, S, vc, sp, a.mm_cache)
             val_loaders["val"] = DataLoader(vds, batch_size=a.micro_batch, shuffle=False, num_workers=0, collate_fn=collate)
     total_steps = max(total_steps, 1)
     n_samples = len(ds)

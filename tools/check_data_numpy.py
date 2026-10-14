@@ -7,6 +7,8 @@ import tempfile
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+from common_io import field_text, split_limit  # noqa: E402
 from hvlm.data_core import (TokenMixer, collate_sequences, encode_conversation,  # noqa: E402
                             normalize_messages, sample_order)
 
@@ -107,6 +109,49 @@ check("right padding with pad id / -100", (ids_b[1, len(b[0]):] == 6).all() and 
 first_img = int(np.where(ids_b[0] == 5)[0][0])
 check("image tokens carry (t,h,w) grid positions", pos[0, 0, first_img] == pos[0, 0, first_img + 48] and pos[1, 0, first_img + 7] == pos[1, 0, first_img] + 1 and pos[2, 0, first_img + 1] == pos[2, 0, first_img] + 1)
 check("text-only row has plain arange positions", (pos[:, 1, :len(b[0])] == np.arange(len(b[0]))[None]).all())
+
+# ---- source specs: field grammar (scripts/common_io.py) ---------------------------------------
+check("split_limit strips a trailing @N", split_limit("hf:org/name:text:train@300000") == ("hf:org/name:text:train", 300000))
+check("split_limit leaves other specs alone", split_limit("jsonl:data/a.jsonl:text") == ("jsonl:data/a.jsonl:text", None))
+
+lccc = {"dialog": ["在吗", "在的咋啦"]}
+check("whole-record field flattens list columns", field_text(lccc, "-") == "在吗\n在的咋啦")
+check("named list column joins with newlines", field_text(lccc, "dialog") == "在吗\n在的咋啦")
+
+forum = {"主题": "今天吃什么", "回复": [{"楼ID": "1", "回复": "火锅"}, {"楼ID": "2", "回复": "随便"}]}
+check("dotted path walks into a list of dicts", field_text(forum, "回复.回复") == "火锅\n随便")
+check("'+' concatenates fields in order", field_text(forum, "主题+回复.回复") == "今天吃什么\n火锅\n随便")
+check("missing field yields no document", field_text(forum, "没有这个字段") is None)
+
+# ---- source specs: record shapes (hvlm/data_core.normalize_messages) --------------------------
+check("LCCC 'dialog' maps onto alternating user/self turns",
+      [t["role"] for t in normalize_messages({"dialog": ["在吗", "在的", "忙啥"]})] == ["user", "self", "user"])
+soda = normalize_messages({"dialogue": ["a", "b", "a2", "b2"], "speakers": ["A", "B", "A", "B"]})
+check("SODA 'speakers' decides who is self", [t["role"] for t in soda] == ["user", "self", "user", "self"])
+inst = normalize_messages({"system": "你是店员", "instruction": "打个招呼", "input": "客人进来了", "output": "来啦"})
+check("instruction/input/output + system maps to system/user/self",
+      [(t["role"], t["content"]) for t in inst] == [("system", "你是店员"), ("user", "打个招呼\n客人进来了"), ("self", "来啦")])
+rp = normalize_messages({"system_prompt": "你是林小雨", "conversations": [{"from": "human", "value": "在吗"},
+                                                                        {"from": "gpt", "value": "在的"}]})
+check("system_prompt is prepended without duplicating a system turn", [t["role"] for t in rp] == ["system", "user", "self"])
+pc = normalize_messages({"personality": ["我喜欢滑雪"], "history": ["你好", "今天干嘛"], "candidates": ["x", "去滑雪"]})
+check("PersonaChat: personality -> system, last candidate -> self",
+      [(t["role"], t["content"]) for t in pc] == [("system", "我喜欢滑雪"), ("user", "今天干嘛"), ("self", "去滑雪")])
+emp = normalize_messages({"conv_id": "hit:0_conv:1", "context": "sentimental", "prompt": "I miss my dog",
+                          "utterance": "that sounds rough", "speaker_idx": 1})
+check("EmpatheticDialogues: one utterance per row maps to prompt -> reply",
+      [(t["role"], t["content"]) for t in emp] == [("user", "I miss my dog"), ("self", "that sounds rough")])
+check("the emotion label in 'context' is not glued onto the prompt", "sentimental" not in emp[0]["content"])
+try:
+    normalize_messages({"messages": [{"role": "assistant", "content": "hi"}]})
+    check("'assistant' role is rejected (would turn the model into an assistant)", False)
+except ValueError:
+    check("'assistant' role is rejected (would turn the model into an assistant)", True)
+try:
+    normalize_messages({"foo": 1})
+    check("unrecognised record shape is rejected", False)
+except ValueError:
+    check("unrecognised record shape is rejected", True)
 
 print("\nALL PASS" if ok else "\nSOME CHECKS FAILED")
 sys.exit(0 if ok else 1)
