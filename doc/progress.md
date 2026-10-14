@@ -11,11 +11,11 @@
   而不是 `zip`，否则最短源会把整轮卡住、并让目标分布只占 tokenizer 语料的 ~1%）；`hf:` / `jsonl:` /
   `parquet:` / `txt:` 流式来源（`@N` 限制文档
   数；字段支持整条记录 `-`、嵌套路径 `a.b` 与拼接 `a+b`，列表型字段自动拼成一篇文档）；`parquet:` 支持
-  远端 `hf://` glob，用来读 Hub 的自动转换 parquet 分支——这是 `datasets` ≥ 4 禁用加载脚本后，LCCC /
-  DailyDialog / EmpatheticDialogues 以及 Fineweb-Edu 分数档仍可取的办法；`--desegment` 去掉分词型中文
-  语料（LCCC）里汉字之间的空格，tokenizer / prepare_data / train(align,sft) 三个入口都有；按来源分别
-  tokenize、训练时按权重混合；文档 `<|endoftext|>` 分隔的扁平 uint16 分片；多模态 collator（图像 49
-  token、(t,h,w) 网格位置、`system` 人设不计损失、只对 `self`（被模仿方）回复计损失、非法样本丢弃）。
+  远端 `hf://` glob，用来读 Hub 的自动转换 parquet 分支；
+  `--desegment` 去掉分词型中文语料（LCCC）里汉字之间的空格，tokenizer / prepare_data / train(align,sft)
+  三个入口都有；按来源分别 tokenize、训练时按权重混合；文档 `<|endoftext|>` 分隔的扁平 uint16 分片；
+  多模态 collator（图像 49 token、(t,h,w) 网格位置、`system` 人设不计损失、只对 `self`（被模仿方）回复
+  计损失、非法样本丢弃）。
   `--mm_data` 既收本地 jsonl，也收 HF/parquet/glob 来源（先流式落一份缓存 jsonl 再训练）；SFT 直接认
   `messages` / `conversations` / 整段对话列表 / `instruction→output` / PersonaChat 这几种开源数据集形状。
 - **训练**：单卡三阶段 trainer（`pretrain` / `align` / `sft`）、WSD 与 cosine 调度、`--resume` 续训
@@ -33,26 +33,23 @@
 - **身份与 persona**：`system` 预设已支持且不计损失，但没有身份注入模板、也没有跨会话一致性检查；无预设时身份从语料随机采样、可能前后不一致（定位内的预期行为，需要评测覆盖而不是"修复"）。
 - **评测**：未集成对话评测，验证集只给出 ppl。缺人类盲测、越界拒答率/误拒率、回复长度分布、助理腔模式词命中等脚本。**尤其是没有知识评测**——想判断"通识够不够"必须先有 50–200 题的常识集（天气/心情/身边事/简单事实 + 若干"该答不知道"），用生成而不是 ppl 打分；在那之前"加百科"是盲加（见 `doc/training.md` §2）。
 - **拒答数据**：无内置越界 prompt 库与人类口吻拒答模板
-- **字幕集清洗**：`chenrm/anime-subtitles` 的 `data` 字段是**整份 `.ass` 文件**（含 `[Script Info]` 头、
-  样式定义、时间轴与 `\N` 换行标记）。实测 **64 份抽样：真对白只占原始字符的 12%（中位 14.9%）**，全量
-  8.1B 字符里只有 ~0.6B 字符是对话。也就是说**不清洗的话，字幕桶 88% 的 token 预算花在格式标记上**；
-  清洗后约 0.4B token，是扩中文 chat 桶最划算的一步。需要写的清洗：只取 `Dialogue:` 行的最后一个字段、
-  剥掉 `{...}` 覆盖标签、把 `\N`/`\n` 还原成空格。
-- **MNBVC 取不到**：`datasets` ≥ 4 拒绝加载脚本，而 MNBVC 没有自动转换的 parquet 分支（`refs/convert/parquet`
-  revision 不存在），所以 `hf:` 与 `parquet:hf://` 都拿不到它——论坛语料（扩中文 chat 桶最对口的量）
-  暂时不可用。两条路：把 `datasets` 钉到 3.x（回退加载脚本），或把 MNBVC 落成本地 parquet/jsonl 再喂。
-- **英文对话清洗**：英文桶里**真人写的小集**各自带格式噪声，进桶前都要过一遍：DailyDialog 标点被空格隔开
-  （`dinner ?`）、EmpatheticDialogues 把逗号转义成 `_comma_`、`Fishball02/topical-chat` 带 `<s>[agent_1]`
-  标记、Cornell Movie-Dialogs 每行一句且带角色名前缀。SODA 实测干净（20k 行抽样只有 0.25% 含方括号），
-  不需要清洗。见 `doc/datasets.md` §1 英文对话表。
-- **SODA 是合成语料**：`allenai/soda` 占英文桶（5%）的绝大部分，但它是 InstructGPT 蒸馏出来的
-  （`language_creators:machine-generated`），偏离 §0"用人类对话调风格"的原则。人工抽查助理腔不明显故已
-  启用，仍需评测覆盖：在 §6 的回复长度分布与助理腔模式词统计里单独看它的影响，中文闲聊一旦回退就优先
-  降它的权重。英文在这个项目里只负责防中英混输退化，不负责提能力。
+- **字幕集清洗**：`chenrm/anime-subtitles` 的 `data` 字段（`.ass` 全文，见 `doc/datasets.md` §1）实测
+  **64 份抽样：真对白只占原始字符的 12%（中位 14.9%）**，全量 8.1B 字符里只有 ~0.6B 字符是对话。也就是
+  说**不清洗的话，字幕桶 88% 的 token 预算花在格式标记上**；清洗后约 0.4B token，是扩中文 chat 桶最划算
+  的一步。需要写的清洗：只取 `Dialogue:` 行的最后一个字段、剥掉 `{...}` 覆盖标签、把 `\N`/`\n` 还原成空格。
+- **MNBVC 取不到**：它没有自动转换的 parquet 分支（`refs/convert/parquet` revision 不存在），所以
+  `parquet:hf://` 也拿不到它——论坛语料暂时不可用。两条路：把 `datasets`
+  钉到 3.x（回退加载脚本），或把 MNBVC 落成本地 parquet/jsonl 再喂。
+- **英文对话清洗**：英文桶里**真人写的小集**各自带格式噪声，进桶前都要过一遍（逐集的字段/噪声说明见
+  `doc/datasets.md` §1 英文对话表）；只有 SODA 干净，不用清洗。
+- **SODA 是合成语料**：它占英文桶（5%）的绝大部分，却是 InstructGPT 蒸馏出来的（`language_creators:
+  machine-generated`），偏离 `doc/training.md` §0"用人类对话调风格"的原则；定性、抽查结论与「为什么不加
+  英文百科」都写在 `doc/datasets.md` §1 英文对话部分。仍需评测覆盖：在 `doc/training.md` §6 的回复长度
+  分布与助理腔模式词统计里单独看它的影响，中文闲聊一旦回退就优先降它的权重。
 - **SFT 没有配比控制点**：`ChatDataset` 把 `--mm_data` 的各项**按行数拼接**成一个 offsets 列表，没有权重
-  参数——`human_dialog.jsonl : persona.jsonl : refuse.jsonl` 的比例谁的行数多谁说了算，§4.4 要求的
-  "拒答 2–8%"目前只能靠人工数行数落实。所以说"对话比例放到 SFT 调"在当前代码里**没有可调的旋钮**。
-  需要补：给 SFT 来源加权重（或按目标比例重采样），并打一份各来源的行数/长度分布报告。
+  参数——`human_dialog.jsonl : persona.jsonl : refuse.jsonl` 的比例谁的行数多谁说了算，`doc/training.md`
+  §4.4 要求的"拒答 2–8%"目前只能靠人工数行数落实。所以说"对话比例放到 SFT 调"在当前代码里**没有可调的
+  旋钮**。需要补：给 SFT 来源加权重（或按目标比例重采样），并打一份各来源的行数/长度分布报告。
 - **百科与长文的语料质量问题**（都是实测出来的，进桶前要处理）：
   - `wikimedia/wikipedia` 中文版 **400 篇里 366 篇繁简混用**，对简体 IM 模型会诱导输出繁体字，
     需要一步繁→简统一（opencc）。
@@ -61,14 +58,11 @@
   - 现代出版中文小说有版权、开源界不存在；小说桶能上量的只有网文，所以"多来点人类写的小说"只能靠
     在现有 20% 内替换提质，不能靠新增来源。
 - **分片顺序偏差**：`prepare_data` 按 `parquet:` glob 的排序顺序读、遇 `--max_tokens` 即停，而分片顺序
-  是有结构的（实测首/末片见 `doc/training.md` §5）：Fineweb-Edu `4_5` **按来源语料分组**（首片 `CCI3`、
-  末片 `OpenCSG-CC`），只取 1% 就是清一色 CCI3；字幕按目录（`剧场版(OVA)` 在前、`季度番(散)` 在后）；
-  网文按书顺序走。wiki / baidu 的排序恰好好处是把长尾排在后面，顺序截断反而有利。
-  要处理的话两个方向：给 `parquet:` 源加「按步长/随机挑分片」的能力，或这几个桶先下全量再在上游采样。
-- **按步长挑分片（parquet 源）**：给 `parquet:` 的 `hf://` glob 加一个步长/随机选项（如 `--shard_stride N`
-  或 spec 后缀 `@stride=N`），让 Fineweb-Edu `4_5` 取 1% 时能均匀覆盖 `CCI3` / `OpenCSG-CC` / `map-cc`，
-  而不是清一色 `CCI3`（见上一条与 `doc/training.md` §5 的分片排序表）。同样能用在字幕按目录分组、
-  网文按书排序这两处。
+  是有结构的——各源首/末片实测见 `doc/training.md` §5，wiki / baidu 的顺序截断反而有利，Fineweb-Edu 与
+  字幕则偏得很厉害。要处理的话两个方向：给 `parquet:` 的 `hf://` glob 加「按步长/随机挑分片」的能力
+  （如 `--shard_stride N` 或 spec 后缀 `@stride=N`），让 Fineweb-Edu `4_5` 取 1% 时能均匀覆盖 `CCI3` /
+  `OpenCSG-CC` / `map-cc`，而不是清一色 `CCI3`；同样能用在字幕按目录分组、网文按书排序这两处。或者这几
+  个桶先下全量再在上游采样——字幕反正要写清洗脚本，清洗时在全 60 片上采样即可。
 - **LCCC base 与 large 有重叠**：实测在 large 的一个分片里检索 base 采样，直接命中 6.7%；按分片占比
   （2.8M/12M）折算，两者真实重叠约 **30%**。base 本来就是 large 的清洗子集，所以同时用两个来源会让
   ~7% 的 chat 桶 token 是重复对话（1.29 遍的桶里再叠一层）。要在意就去重，或只用 large。

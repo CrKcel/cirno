@@ -1,4 +1,4 @@
-# Cirno-130M 训练：端侧对话 / 角色扮演特化模型
+# Cirno-130M 训练：端侧对话 & 角色扮演模型
 
 ## 0. 设计定位
 
@@ -7,10 +7,8 @@
 | 用途 | IM 软件内置拟人化自动回复；游戏内置 NPC 角色扮演；一切"像人在聊天"的场景 |
 | 目标 | 流畅、口语化、符合人设的自然语言对话，模仿人类使用即时通讯软件的说话方式 |
 | 做什么 | 日常闲聊、情绪陪伴、简单通识（常识、天气、心情、身边事、简单事实） |
-| 不做什么 | 复杂数学/物理题、构建代码项目、专业医疗/法律咨询等；被问到时用人类口吻表示不会，并建议"问 AI" |
-| 资源 | 端侧（手机 / NPU / 低端单卡）推理；推理参数 116.65M（纯文本）或 131.0M（带视觉），MTP 只训练用 |
+| 不做什么 | 复杂数学/物理题、构建代码项目、专业医疗/法律咨询等 |
 | SFT | 用**人类—人类对话**调风格，而不是用"助理回答"调能力 |
-| 身份 | 模型不认为自己是 AI；身份来自上下文预设；没有预设时被问名字等身份信息会给出随机的人类信息 |
 
 三条推论：
 
@@ -42,11 +40,11 @@
   | 语料 | 权重 | 目标重复 | 说明 |
   |---|---|---|---|
   | 人类对话 / 口语文本（中文） | 45% | 1–1.5 遍 | IM 聊天记录、论坛贴吧回复、字幕、访谈、播客转写；保留短句、语气词、emoji、重复、错别字 |
-  | 英文对话 | 5% | <1 遍 | `allenai/soda`（实测 1.2M 会话 / 平均 632 字符 / ~190M token）加几个真人小集。**soda 是 InstructGPT 蒸馏的合成数据**，抽查助理腔不明显所以启用，但它不是人类语料，权重压在 5% 并单独盯；中英混输/拉丁字母鲁棒性靠它 |
+  | 英文对话 | 5% | <1 遍 | `allenai/soda`加几个真人小集。中英混输 / 拉丁字母鲁棒性靠它 |
   | 小说 / 网文 / 剧本对白 | 20% | <1 遍 | 叙事 + 角色对白，提供人设口吻与长程一致性 |
   | 长文 / 非对话文本 | 15% | <1 遍 | 长文章、书籍、深度报道、长回答；补篇章连贯性与长文鲁棒性，不是补推理 |
   | 通识 / 百科 / 常识 | 14.5% | <1 遍 | 确保"通识能答" |
-  | 角色扮演语料 | 0.5%（上限） | 1–2 遍 | persona 卡片 + 多轮扮演。公开扮演语料总共只有 ~6M token（11.7 MB parquet），1% 就是 5 遍——**撑不起百分比**，只能当"system 人设格式"的信号；人设能力靠 SFT，想提高这个权重只能自己造数据（小说/剧本改造成多轮扮演） |
+  | 角色扮演语料 | 0.5%（上限） | 1–2 遍 | persona 卡片 + 多轮扮演。公开扮演语料总共只有 ~6M token，只能当"system 人设格式"的信号；人设能力靠 SFT |
   | 代码 / 数学 / 专业长文 | 0–2% | — | 不追求这方面能力；130M 上买不到推理泛化，反而稀释对话分布并强化助理腔 |
 
   权重按比例生效（`TokenMixer` 会归一化），不必凑成 1。配比按**实际 token 数**定，不按目录大小或文件
@@ -57,36 +55,31 @@
   再往上加只会变成背语料。想要更高的中文对话占比，先扩 chat 桶（字幕清洗 / 论坛 / 播客转写），再改权重。
   英文侧反过来：真人写的英文闲聊加起来只有 ~14M token，能撑起 5% 权重的只有 `allenai/soda`（~190M token），
   而它是合成数据——所以英文给 5% 封顶，用来防中英混输退化，不是用来提量的。
-- **非对话文本的天花板（重要）**：当前配比里小说 20% + 长文 15% + 通识 14.5% = **49.5% 是非对话文本**，
-  对话只占 50.5%。而这个模型的评测**全是对话类**（人类盲测、人设一致性、拒答率、回复长度分布），
-  长文只贡献"连贯性下限"和常识地平线，边际收益很早就饱和，风险却很实在——§4.5 已经把"回复越来越长"
-  列为失败模式，长文占比越高越容易触发。所以：**不要再抬长文/通识的百分比**。真想在长文上多花预算，
+- **非对话文本的天花板**：当前配比里小说 20% + 长文 15% + 通识 14.5% = **49.5% 是非对话文本**，
+  对话只占 50.5%。
+  长文贡献"连贯性下限"和常识地平线，在长文上多花预算，
   正确做法是**加总 token（3B → 4B）并保持 chat 的绝对 token 不变**（1.35B ≈ 1.3 遍），多出来的量给
   通识和长文；代价是 33% 算力，换到的是不稀释对话分布的额外语言能力。
-- **"多来点人类写的小说"在开源界没有好增量**：现代出版小说有版权、不存在；`wikimedia/wikisource` 中文版
-  是真公版书但**实测 68% 偏文言文**（对 IM 模型是风格污染，见 [datasets.md §1](datasets.md)）；剩下能上量的
-  只有网文（已在小说桶里）。所以小说这一侧该做的是**在同一 20% 内提质**（替换部分低质网文），不是加量。
-  百科这一侧倒是有真增量：`lars1234/baidu-baike-dataset` 是简体白话，比繁简混用的中文维基干净。
+- **"多来点人类写的小说"在开源界没有好增量**：现代出版小说有版权、不存在；真公版书（`wikimedia/wikisource`）
+  有文言文污染，剩下能上量的只有网文。所以小说这一侧该做的是**在同一 20% 内提质**（替换部分低质网文），不是加量。
 - **通识：瓶颈是参数量，不是 token 数**。知识桶只占 14.5%（435M token），但实测可用的中文百科远不止：
-  百度百科 5.63M 条（整条 ~1.5B token；`title+summary` ~184M token，**中位仅 130 / 78 字**）、中文维基
-  1.4M 篇（~2.05B token，中位 3624 字）——合计 ~3.5B token，是配额的 **8 倍**。所以"通识内容会不会太少"
+  百度百科 5.63M 条（~1.5B token）、中文维基 1.4M 篇（~2.05B token）——合计 ~3.5B token，是配额的
+  **8 倍**。所以"通识内容会不会太少"
   不是数据问题：116.65M 参数能存下的事实本来就有限，继续灌百科不会让它变多，超过容量后不同事实还会互相
-  干扰（同一批权重塞进更多事实，反而压低已记住那些的召回）。**英文百科更不解决这个问题**——它教的是英文
-  事实，130M 上不存在可靠的中英跨语言知识迁移；要用英文，唯一正当理由是"英文语言建模"，那属于英文桶。
+  干扰（同一批权重塞进更多事实，反而压低已记住那些的召回）。
   按性价比排序，真正能改善通识的四件事：
-  1. **先测**：现在没有任何知识评测（§6 只有 ppl）。先写 50–200 题的常识集（天气 / 心情 / 身边事 / 简单事实
+  1. **先测**：现在没有知识评测。先写 50–200 题的常识集（天气 / 心情 / 身边事 / 简单事实
      + 若干"该答不知道"的题），用**生成**而不是 ppl 打分。否则就是在给一个没量过的缺口加数据。
-  2. **提事实密度而不是提量**：百度百科中位条目只有 130 字，比中文维基中位 3624 字的论述型长文更贴近
-     "一句话把事实说清楚"的形态；改用 `title+summary` 取字段（中位 78 字）能把每 token 的事实密度再抬一截。
+  2. **提事实密度而不是提量**：百度百科是短条目，比中文维基的论述型长文更贴近"一句话把事实说清楚"的形态；
+     改用 `title+summary` 取字段能把每 token 的事实密度再抬一截（中位字数见 [datasets.md §1](datasets.md)）。
   3. **课程安排**：把知识桶更多地压进 WSD 衰减阶段（最后 20%，`--decay_frac`），晚期上采样的事实留存优于
      全程均匀铺开。
   4. **形态差归 SFT**：目标行为是"闲聊里顺口答一句常识"，百科是论述文体。这个形态差要靠 SFT 补（简短、
      口语、不确定就说不知道），不是预训练再加几百 M token 能解决的。
-- **清洗**：分词型语料必须去空格。`silver/lccc` 的 `dialog` 是**空格分词**的（`你 去 那儿 竟然`），
-  直接用会让模型学着在汉字之间输出空格；tokenize 时加 `--desegment`（见 `common_io.desegment_cjk`）。
-  字幕集的 `.ass` 文件是**重灾区**：实测真对白只占原始字符的 **12%**（全量 8.1B 字符里仅 ~0.6B 是对话），
-  不清洗等于把字幕桶 88% 的 token 预算花在 `[Script Info]`、样式和时间轴上（见 progress.md TODO）。
-- **语料盘点（3B 预算的实际账）**：字符→token 按 0.7 tok/char 估算（32k BPE、中文为主，±20%），
+- **清洗**：分词型语料必须去空格——`silver/lccc` 的 `dialog` 直接用会让模型学着在汉字之间输出空格，
+  tokenize 时加 `--desegment`（原理与三个入口见 §5）。字幕集的 `.ass` 标记同样是重灾区，不清洗会把字幕桶
+  绝大部分 token 预算花在 `[Script Info]`、样式和时间轴上（实测比例与清洗步骤见 progress.md TODO）。
+- **语料盘点**：字符→token 按 0.7 tok/char 估算（32k BPE、中文为主，±20%），
   真实值以 `prepare_data` 输出的 `train_tokens` 为准。
 
   | 桶 | 权重 | 预算 token | 可用唯一 token（实测/估算） | 实际遍数 |
@@ -100,20 +93,7 @@
 
   合计：**预算 3.0B，实际消耗的唯一 token ≈ 2.7B**，重复率约 10%，且全部集中在 chat 与 roleplay 两个桶
   （其余四个桶连一遍都跑不满）。可选语料池约 **55B token，但其中 46B 来自 Fineweb-Edu 单一来源**；
-  剔掉它，真正的多源语料池只有 ~8.7B，其中干净的中文对话仍是**最紧的那一环**。
-- **离 Chinchilla 有多远：不是"差多少"，而是已经超了**。Chinchilla 参照 20 token/参数，按三个口径：
-  | 口径 | 参数量 | 20× 最优 token | 3B 预算是它的 |
-  |---|---|---|---|
-  | 仓库总口径（LLM+ViT+MTP） | 136.67M | 2.73B | **1.10×** |
-  | 纯文本训练实际参数（LLM+MTP，跳过 align） | 122.31M | 2.45B | **1.23×** |
-  | 推理主干（LLM） | 116.65M | 2.33B | **1.29×** |
-
-  即 3B 已经越过最优点 10–29%。所以当前缺的不是 token 数，而是唯一语料的质量与多样性——这正是前面
-  反复落在"清洗字幕 / 扩中文 chat / 提质百科"而不是"加训练步数"上的原因。若要继续加预算，参考 §2 规模
-  一条：加总 token 时保持 chat 的绝对 token 不变，多出来的量给长文与通识。
-- **脚本型数据集**：`datasets` ≥ 4 不再支持加载脚本，LCCC / MNBVC / DailyDialog / EmpatheticDialogues
-  的 `hf:` 直连会报 `Dataset scripts are no longer supported`；改用 Hub 的自动转换 parquet 分支，
-  即 `parquet:hf://datasets/<repo>@refs/convert/parquet/<config>/<split>/*.parquet:<field>`。
+  剔掉它，真正的多源语料池只有 ~8.7B，其中干净的中文对话仍是**最紧的那一环**。加总 token 时保持 chat 的绝对 token 不变，多出来的量给长文与通识。
 - **序列**：1024 够用（IM 对话天然短）。把多个会话拼进同一条序列时仍用 `<|endoftext|>` 分隔，并尽量让一条序列 = 一个完整会话，模型才能看到会话边界。长文桶在 1024 的窗口里只能贡献窗口内的连贯性；
   想要真正的长程收益，在衰减阶段单独用长文、`--seq_len 2048` 续训一段。
 - **优化器**：AdamW（β=0.9/0.95，wd=0.1，不对 norm/bias/嵌入/`A_log`/`dt_bias` 做衰减），梯度裁剪 1.0。
@@ -123,14 +103,14 @@
 ## 3. 阶段 2：视觉对齐（可选）
 
 - **先问要不要**：只有部署场景真的会看到图才做这一步——IM 里发表情包/梗图/聊天截图、游戏里要看立绘或场景。纯文字聊天 + NPC 对话可以**完全跳过**，直接
-  `--stage sft --init_from runs/pretrain/final --train llm`；此时 ViT 保持随机初始化、不参与推理，模型
-  只有 116.65M 参数。跳过 align 时 SFT 数据必须是纯文本：混入图像只会让随机初始化的 ViT 往 LLM 里灌噪声（`--train llm`）或顺带训出一个没对齐过的 ViT（默认的 `--train llm,vit`）。
+  `--stage sft --init_from runs/pretrain/final --train llm`；此时 ViT 保持随机初始化、不参与推理。跳过 align
+  时 SFT 数据必须是纯文本：混入图像只会让随机初始化的 ViT 往 LLM 里灌噪声（`--train llm`）或顺带训出一个没对齐过的 ViT（默认的 `--train llm,vit`）。
 - **要做的数据必须是"对话里的图"**，而不是学术 caption/VQA：表情包/贴纸 + 意图标签、梗图 + 上下文、
   聊天截图 → 学"图在对话中是什么语气"。标准 VQA 问答对会把模型往助理方向拉，与本定位冲突。
 - 训练方式不变：冻结 LLM，只训练 ViT + 投影器（`--stage align`），seq 512，1 个 epoch，lr 5e-4。
 - **数据须全是带图记录**：LLM 冻结时，没有图的 micro-batch 没有可训练参数（脚本会跳过其反向）。
-- 这个 ViT 只有 14.4M 且从零训练，识别能力有限（"能认颜色/形状/粗略场景和表情"量级）。要更强：把
-  `vision_config` 加大（代价是显存），或先用对比学习/蒸馏预训练 ViT 再接入。
+- 这个 ViT 只有 14.4M 且从零训练，识别能力有限（"能认颜色/形状/粗略场景和表情"量级）；要更强的视觉，
+  见 progress.md 的"视觉对齐"一条。
 
 ## 4. 阶段 3：对话 / 角色扮演 SFT
 
@@ -138,7 +118,7 @@
 
 ### 4.1 数据
 
-- **来源**（可混用）：真实人类—人类对话（聊天记录、公开论坛/群聊、客服对话）、剧本 /
+- **来源**：真实人类—人类对话（聊天记录、公开论坛/群聊、客服对话）、剧本 /
   小说对白改编、人工编写的 persona 多轮对话（角色卡 + 日常闲聊 + 情绪安抚 + 话题跳转）、少量领域拒答样本。
 - **格式**（与 `data_core.normalize_messages` 一致，二选一）：
 
@@ -169,17 +149,17 @@
 
 ### 4.3 身份与"像人"的行为
 
-- 训练语料里不出现任何 AI 自我描述，也不要给模型固定名字；模型的身份完全由 `system` 决定。
+- 训练语料里不出现任何 AI 自我描述，也不要给模型固定名字；模型的身份由 `system` 预设决定（无预设时的行为见 §4.1）。
 - 允许并鼓励"人类才有"的行为：短回复、连发多条消息、语气词（哈哈哈 / xswl / 草）、emoji、
   答非所问、偶尔不耐烦、记不清之前说过的话。
 - `system` 只写人设（身份、口吻、与对方的关系、禁区），不写"你是 AI 助手"。
 
-### 4.4 越界拒答（"我不会，你问 AI"）
+### 4.4 越界拒答
 
-- 目标行为：被要求解数学/物理题、写代码项目、给医疗/法律等专业结论时，用**人类口吻**表示不会，并建议去问 AI。例：「这题我真不会，你问 AI 吧」「这个得找医生看，我哪懂这个」「写代码我不行，你让 AI 给你写」。
+- 目标行为：被要求解数学/物理题、写代码项目、给医疗/法律等专业结论时，表示不会。例：「这题我真不会，你问 AI 吧」「这个得找医生看，我哪懂这个」「写代码我不行，你让 AI 给你写」。
 - 不能出现的措辞：「作为 AI 我无法…」「我是一个语言模型…」——那会直接暴露 AI 身份并破坏人设。
 - 构造方式：用一个覆盖各领域的越界 prompt 库（数学/物理/代码/医疗/法律/长文写作等）配 1–3 条符合人设的口语化回复；这些样本同时带上人设，避免学成"万能拒答机"。
-- 配比 2–8%。太少会残留"尝试解题"的行为（在 130M 上表现为胡编），太多会让日常闲聊也拒答。
+- 配比 2–8%。太少会残留"尝试解题"的行为，太多会让日常闲聊也拒答。
 
 ### 4.5 常见失败模式
 
@@ -208,7 +188,7 @@ python scripts/train_tokenizer.py --out tokenizer --desegment \
 
 # 1. 每个来源单独 tokenize，训练时再用权重混合，改配比不必重新 tokenize。
 #    §2 的六个桶都能直接在 HF 上取，列表型字段会自动拼成一篇文档，不需要先落地成本地 jsonl。
-#    LCCC 用转换后的 parquet 分支（hf: 直连会因加载脚本被 datasets >= 4 拒绝），并加 --desegment
+#    LCCC 用转换后的 parquet 分支（写法见下），并加 --desegment
 #    去掉分词空格。--max_tokens 直接取"权重 × 总 token"，跑完看 meta.json 的 train_tokens 是否够：
 python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/chat --max_tokens 1350000000 --val_tokens 4000000 \
     --source "parquet:hf://datasets/silver/lccc@refs/convert/parquet/base/train/*.parquet:dialog" \
@@ -228,12 +208,12 @@ python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/long --max_t
     --source "parquet:hf://datasets/opencsg/Fineweb-Edu-Chinese-V2.1@main/4_5/*.parquet:text"
 python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/wiki --max_tokens 435000000 \
     --source "parquet:hf://datasets/lars1234/baidu-baike-dataset@refs/convert/parquet/default/partial-train/*.parquet:-"  # 简体白话百科（主力）
-    # --source "hf:wikimedia/wikipedia:text:20231101.zh:train"       # 实测繁简混用，先过 opencc 再进桶
+    # --source "hf:wikimedia/wikipedia:text:20231101.zh:train"       # 繁简混用，需先统一成简体（见 progress.md）
 python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/roleplay --max_tokens 15000000 \
     --source "hf:shibing624/roleplay-zh-sharegpt-gpt4-data:-:sharegpt_formatted_data-evol-gpt4:train" \
     --source "hf:Johnson8187/role-play-chinese:-:default:train"
 
-# 2. 预训练（配比见 §2；en_chat 5% 封顶、roleplay 0.5%——后者两套公开语料加起来只有 ~6M token）
+# 2. 预训练（配比见 §2）
 python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
     --data data/bin/chat:0.45,data/bin/en_chat:0.05,data/bin/fiction:0.20,data/bin/long:0.15,data/bin/wiki:0.145,data/bin/roleplay:0.005 \
     --tokens 3e9 --resume
@@ -249,8 +229,8 @@ python scripts/train.py --stage sft --tokenizer tokenizer \
     --mm_data data/sft/human_dialog.jsonl,data/sft/persona.jsonl,data/sft/refuse.jsonl \
     --epochs 2 --lr 2e-4 --resume
 
-# 同一个 SFT 阶段也可以直接吃 HF 数据源，不用先落 jsonl。
-# LCCC 走转换后的 parquet 分支，并且要 --desegment，否则学到的目标是分词空格：
+# 同一个 SFT 阶段也可以直接吃 HF 数据源，不用先落 jsonl：
+# LCCC 走转换后的 parquet 分支，并且要 --desegment：
 python scripts/train.py --stage sft --tokenizer tokenizer \
     --init_from runs/pretrain/final --out_dir runs/sft --train llm --epochs 2 --lr 2e-4 --resume --desegment \
     --mm_data "parquet:hf://datasets/silver/lccc@refs/convert/parquet/base/train/*.parquet:dialog,hf:shibing624/roleplay-zh-sharegpt-gpt4-data:-:sharegpt_formatted_data-evol-gpt4:train"
@@ -262,9 +242,10 @@ python scripts/train.py --stage sft --tokenizer tokenizer \
   `dialog`、MNBVC 的 `回复`）会自动用换行拼接成一篇文档，所以不需要先写转换脚本；没有字段名时可先用
   `-` 取整条记录。文档之间用 `<|endoftext|>` 分隔，产物是扁平 uint16 token 流 + `meta.json`。
 - `parquet:` 也接受远端 `hf://` glob，例如
-  `parquet:hf://datasets/silver/lccc@refs/convert/parquet/base/train/*.parquet:dialog`。这是 `datasets` ≥ 4
-  禁用加载脚本后读 LCCC / MNBVC / DailyDialog / EmpatheticDialogues 的办法，也是取 Fineweb-Edu-Chinese
-  某个分数档（`4_5/*.parquet`，它不是 config）的办法。路径里的 `@refs/...` 是 revision，不是 `@N` 文档上限。
+  `parquet:hf://datasets/silver/lccc@refs/convert/parquet/base/train/*.parquet:dialog`。这条写法有几种用途：
+  读只带加载脚本的集（LCCC / DailyDialog / EmpatheticDialogues 等，规则见 [datasets.md §1](datasets.md)
+  开头）、以及取 Fineweb-Edu-Chinese 某个分数档（`4_5/*.parquet`，它不是 config）。路径里的 `@refs/...`
+  是 revision，不是 `@N` 文档上限。
 - **`--desegment`**：去掉汉字之间的空格，给分词型语料用（`silver/lccc` 的 `dialog`、以及任何由它派生的
   SFT 数据）。`train_tokenizer.py` / `prepare_data.py` / `train.py`（align、sft 阶段）都有这个开关；
   它只删"一侧是 CJK"的空格，英文与数字之间的空格不受影响。
@@ -295,8 +276,8 @@ python scripts/train.py --stage sft --tokenizer tokenizer \
   ⚠️ `--source` 是**按给定顺序**读、共享同一个预算的，所以**长文桶填配额时 Fineweb-Edu 根本轮不到**：
   Zhihu-KOL 自己就有 ~0.61B token > 450M 配额。想要 Fineweb-Edu 的文本多样性，得把它排在 Zhihu 之前，
   或者调高/调低两者的相对配额（拆成两个 `prepare_data` 再在 `train.py` 里按权重混）。
-  另外：分片粒度会让实际值偏高（LCCC / soda / 网文每片 300+ MB）；**不要下** Fineweb-Edu `3_4`（800 GB）
-  与 `2_3`（1.4 TB）、`fineweb-2` 的 `cmn_Hani`（**1.62 TB**）、wikisource 中文版（3.3 GB 但 68% 是文言文）。
+  另外：分片粒度会让实际值偏高（LCCC / soda / 网文每片 300+ MB）；不下 Fineweb-Edu `3_4`（800 GB）
+  与 `2_3`（1.4 TB）、`fineweb-2` 的 `cmn_Hani`（**1.62 TB**）、wikisource 中文版。
   `baidu-baike` 优先走 parquet 分支：3.2 GB vs 原始单文件 json 16.8 GB。
   派生出的 token 分片（`data/bin/*`，uint16 即 2 B/token）再占 **~5.4 GB**（实际唯一 2.69B token）；
   加 `last/`（~1.6 GB 优化器状态）与各阶段 `final/`，一次完整三阶段训练合计约 **17 GB**。
@@ -327,14 +308,14 @@ python scripts/train.py --stage sft --tokenizer tokenizer \
 | 语言自然度 | 人类盲测胜率 | 同一上下文，人写回复 vs 模型回复，双盲二选一；目标是接近 50% 分不出 |
 | 人设一致性 | 身份问答一致率 | 同一 persona 多轮问名字/年龄/职业；无人设时统计各会话给出的身份分布（应接近语料先验，且**不**出现 AI 自述） |
 | 越界拒答 | 拒答率 / 误拒率 | 越界 prompt 库（数学/物理/代码/医疗/法律）上的拒答率，以及日常闲聊被误拒的比例 |
-| IM 形态 | 回复长度分布、助理腔词命中 | 与人类对话的长度分位数对比；统计"作为一个 AI / 我可以帮你 / 很高兴为您服务"等模式词 |
+| IM 形态 | 回复长度分布、助理腔词命中 | 与人类对话的长度分位数对比；统计 §4.5 列的那类模式词 |
 | 端侧成本 | 首 token 延迟、decode tok/s、峰值内存 | 在目标设备（手机/NPU）实测 |
 
 自动指标只在回归时看趋势，不作发布门槛；人工盲测和越界拒答率才是。
 
 ## 7. 端侧推理
 
-- **参数量**：推理只加载 LLM 主干 **116.65M**（纯文本）或 **131.0M**（含视觉塔）；MTP 块只用于训练，推理不加载。
+- **参数量**：推理只加载 LLM 主干（纯文本 116.65M，含视觉塔 131.0M），MTP 块只用于训练、不加载。
 - **会话内存**：20 层里 15 层是 Gated DeltaNet，状态大小固定、不随对话轮数增长；只有 5 层 GQA 全注意力需要 KV。长会话的内存增长因此远小于同等规模的纯 Transformer，适合端侧常驻。
 - **短回复**：IM 风格本身就意味着 32–128 token 的输出，decode 是主要成本；建议
   `max_new_tokens ≤ 128`，并用 persona 约束回答长度。
