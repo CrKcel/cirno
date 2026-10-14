@@ -44,7 +44,7 @@ def main():
             pix = load_image(a.image, vc.image_size)[None].to(a.device)
             body = [sp["vision_start"]] + [sp["image_pad"]] * vc.num_image_tokens + [sp["vision_end"]]
         ids = ([sp["im_start"]] + enc("user\n") + body + enc(a.prompt) + [sp["im_end"]] + enc("\n")
-               + [sp["im_start"]] + enc("assistant\n"))
+               + [sp["im_start"]] + enc("self\n"))
     stop = tok.convert_tokens_to_ids("<|endoftext|>" if a.raw else "<|im_end|>")
     with torch.autocast(device_type=torch.device(a.device).type, dtype=torch.bfloat16):
         out = model.generate_simple(torch.tensor([ids], device=a.device), pixel_values=pix,

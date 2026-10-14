@@ -1,11 +1,26 @@
-# Cirno-130M 训练
+# Cirno-130M 训练：端侧对话 / 角色扮演特化模型
 
-训练分三阶段：**文本预训练 → 视觉对齐 → 指令 / VQA 微调**。单一入口是
-[`scripts/train.py`](../scripts/train.py)（单卡 trainer，`--stage` 选择阶段），整条链路见
-[`scripts/run_pipeline.sh`](../scripts/run_pipeline.sh)。每个阶段的产物写到 `--out_dir`：
-`last/`（含优化器状态，供 `--resume`）与 `final/`（权重 + tokenizer，供下一阶段 `--init_from`）。
+## 0. 设计定位
 
-## 1. 阶段默认值
+| 维度 | 设定 |
+|---|---|
+| 用途 | IM 软件内置拟人化自动回复；游戏内置 NPC 角色扮演；一切"像人在聊天"的场景 |
+| 目标 | 流畅、口语化、符合人设的自然语言对话，模仿人类使用即时通讯软件的说话方式 |
+| 做什么 | 日常闲聊、情绪陪伴、简单通识（常识、天气、心情、身边事、简单事实） |
+| 不做什么 | 复杂数学/物理题、构建代码项目、专业医疗/法律咨询等；被问到时用人类口吻表示不会，并建议"问 AI" |
+| 资源 | 端侧（手机 / NPU / 低端单卡）推理；推理参数 116.65M（纯文本）或 131.0M（带视觉），MTP 只训练用 |
+| SFT | 用**人类—人类对话**调风格，而不是用"助理回答"调能力 |
+| 身份 | 模型不认为自己是 AI；身份来自上下文预设；没有预设时被问名字等身份信息会给出随机的人类信息 |
+
+三条推论：
+
+1. **训的是分布，不是能力。** 130M 参数在解题上不可能和真正的助手模型竞争；token 预算更应该花在对话节奏、语气、人设一致性上。把代码和数学稀释了对话分布。
+2. **"助理腔"是负资产。** 长结构化回答、markdown 标题/列表、"我可以帮你…"、"作为一个 AI…" 这类数据不要进预训练和 SFT。
+3. **身份是上下文变量，不是模型常量。** 部署时注入 persona（名字/年龄/性别/职业/口吻）；不给模型训练一个固定名字。
+
+## 1. 三阶段总览
+
+**文本预训练 →（可选）视觉对齐 → 对话 / 角色扮演 SFT**。
 
 以下取自 `scripts/train.py` 的 `STAGE_DEFAULTS`，都可以用同名命令行参数覆盖：
 
@@ -15,53 +30,153 @@
 | `align` | `vit` | 5e-4 | 5% | 512 | 8 | 32 | 131k | 0.0 | 1.0 |
 | `sft` | `llm,vit` | 2e-4 | 3% | 1024 | 8 | 32 | 262k | 0.1 | 0.5 |
 
-`--train` 决定哪些模块可训练（`align` 阶段 LLM 冻结，所以该阶段没有可训练参数的 micro-batch 会被跳过反向）；
-`vit_lr_mult` 是 ViT 相对于 LLM 的学习率倍数。
+`--train` 决定哪些模块可训练（`align` 阶段 LLM 冻结，所以该阶段没有可训练参数的 micro-batch 会被跳过
+反向）；`vit_lr_mult` 是 ViT 相对于 LLM 的学习率倍数。`sft` 是脚本里的历史阶段名，含义是**对话 /
+角色扮演微调**；跳过视觉对齐、只做纯文本对话时用 `--train llm`（见 §3）。
 
-## 2. 阶段 1：文本预训练
+## 2. 阶段 1：预训练
 
-- **数据与配比**：英文教育类网页 50%、中文网页 30%、代码 12%、数学 8%。
-- **规模**：137M 参数，Chinchilla 约 2.7B token；小模型多喂更值。
-- **批量**：脚本默认 `2 × 256 × 1024 = 524k token/步`。
+- **数据配比**（按 token 计，建议值）：
+
+  | 语料 | 权重 | 说明 |
+  |---|---|---|
+  | 人类对话 / 口语文本 | 45–60% | IM 聊天记录、论坛贴吧回复、字幕、访谈、播客转写；保留短句、语气词、emoji、重复、错别字 |
+  | 小说 / 网文 / 剧本对白 | 15–25% | 叙事 + 角色对白，提供人设口吻与长程一致性 |
+  | 角色扮演语料 | 10–20% | persona 卡片 + 多轮扮演；没有现成语料时可由小说/剧本改造 |
+  | 通识 / 百科 / 常识 | 10–15% | 确保"通识能答" |
+  | 代码 / 数学 / 专业长文 | 0–5% | 不追求这方面能力，可以降低 |
+
+- **规模**：Chinchilla 参照约 2.7B token；对话语料够就喂 2–4B。
+- **序列**：1024 够用（IM 对话天然短）。把多个会话拼进同一条序列时仍用 `<|endoftext|>` 分隔，并尽量让一条序列 = 一个完整会话，模型才能看到会话边界。
 - **优化器**：AdamW（β=0.9/0.95，wd=0.1，不对 norm/bias/嵌入/`A_log`/`dt_bias` 做衰减），梯度裁剪 1.0。
-- **学习率**：峰值 1e-3，2% warmup，**WSD 调度**（稳定 → 最后 20% 线性降到 10%）。WSD 的好处是中途任意 checkpoint 都能接着延长训练。若 `gnorm` 经常尖峰，降到 6e-4。
-- **MTP**：主体阶段权重 0.3，最后衰减阶段切到 0.1（`--mtp_weight_final 0.1`）。MTP 在这里的主要作用是提升表征质量/训练信号密度。
-- **序列**：1024。需要长上下文用长上下文配置，每步 token 数不变；也可以绝大部分 token 用 1024、最后 10–20% 切到 2048 作为长上下文收尾。同一序列内的文档用 `<|endoftext|>` 连接。
+- **学习率**：峰值 1e-3，2% warmup，**WSD 调度**（稳定 → 最后 20% 线性降到 10%），中途任意 checkpoint 都能接着延长训练。若 `gnorm` 经常尖峰，降到 6e-4。
+- **MTP**：主体阶段权重 0.3，最后衰减阶段切到 0.1（`--mtp_weight_final 0.1`）。
 
-## 3. 阶段 2：视觉对齐
+## 3. 阶段 2：视觉对齐（可选）
 
-- 冻结 LLM，只训练 ViT + 投影器（`--stage align`），数据为图像-描述对（如 LLaVA-Pretrain 558k 一类），seq 512，1 个 epoch，lr 5e-4。
+- **先问要不要**：只有部署场景真的会看到图才做这一步——IM 里发表情包/梗图/聊天截图、游戏里要看立绘或场景。纯文字聊天 + NPC 对话可以**完全跳过**，直接
+  `--stage sft --init_from runs/pretrain/final --train llm`；此时 ViT 保持随机初始化、不参与推理，模型
+  只有 116.65M 参数。跳过 align 时 SFT 数据必须是纯文本：混入图像只会让随机初始化的 ViT 往 LLM 里灌噪声（`--train llm`）或顺带训出一个没对齐过的 ViT（默认的 `--train llm,vit`）。
+- **要做的数据必须是"对话里的图"**，而不是学术 caption/VQA：表情包/贴纸 + 意图标签、梗图 + 上下文、
+  聊天截图 → 学"图在对话中是什么语气"。标准 VQA 问答对会把模型往助理方向拉，与本定位冲突。
+- 训练方式不变：冻结 LLM，只训练 ViT + 投影器（`--stage align`），seq 512，1 个 epoch，lr 5e-4。
 - **数据须全是带图记录**：LLM 冻结时，没有图的 micro-batch 没有可训练参数（脚本会跳过其反向）。
-- 这个 ViT 只有 14M 且从零训练，视觉识别能力有限（更像"能认颜色/形状/粗略场景"）。要更强：把 `vision_config` 加大（代价是显存），
-  或先用对比学习/蒸馏预训练 ViT 再接入——本仓库未包含这一步。
+- 这个 ViT 只有 14.4M 且从零训练，识别能力有限（"能认颜色/形状/粗略场景和表情"量级）。要更强：把
+  `vision_config` 加大（代价是显存），或先用对比学习/蒸馏预训练 ViT 再接入。
 
-## 4. 阶段 3：指令 / VQA 微调
+## 4. 阶段 3：对话 / 角色扮演 SFT
 
-- 全部参数可训练，ViT 学习率为 LLM 的 0.5 倍，lr 2e-4，1–2 个 epoch，MTP 权重 0.1。
-- **务必混入纯文本对话数据**（建议 ≥ 30%），否则文本能力会退化。
-- 数据格式（二选一，可混用）：
-  `{"image": "相对路径", "conversations": [{"from":"human","value":"<image>\n问题"},{"from":"gpt","value":"回答"}]}` 或 `{"messages":[{"role":"user","content":"..."},{"role":"assistant","content":"..."}]}`。
-- 只对 assistant 回复（及其 `<|im_end|>`）计损失；图像块被截断或回复被截没的样本会被丢弃。
+这一步把基座从"会说话的文本模型"变成"像某个具体的人在聊天"。
+
+### 4.1 数据
+
+- **来源**（可混用）：真实人类—人类对话（聊天记录、公开论坛/群聊、客服对话）、剧本 /
+  小说对白改编、人工编写的 persona 多轮对话（角色卡 + 日常闲聊 + 情绪安抚 + 话题跳转）、少量领域拒答样本。
+- **格式**（与 `data_core.normalize_messages` 一致，二选一）：
+
+  ```json
+  {"messages": [
+    {"role": "system", "content": "你是林小雨，女，24岁，咖啡店店员。说话随意、爱用表情。"},
+    {"role": "user", "content": "在吗"},
+    {"role": "self", "content": "在的在的 咋啦"}
+  ]}
+  ```
+
+  或 `{"conversations": [{"from": "human", "value": "..."}, {"from": "gpt", "value": "..."}]}`。
+- **掩码**：编码器只对 `self` 角色的 token（含其 `<|im_end|>`）计损失，其余上下文只作为条件。
+  在人类对话数据里，"`self`"表示**要被模仿的那一方**——把目标说话人标成 `self`（LLaVA 格式的 `gpt`映射到它），对方标成 `user`。输入角色写成 `assistant` 会被拒绝，该记录会被当作坏样本跳过。想同时学会扮演两个方向，就给同一段对话生成两条记录（A→B、B→A），而不是取消掩码。
+- **人设**：身份预设写在首条 `system`，不计损失。**没有预设时**，模型只能从
+  训练语料里采样，被问"你叫什么/多大/男的女的"会给出随机的人类信息，且多轮之间可能不一致——这是本定位的预期行为。需要稳定身份时，部署侧必须注入 persona。
+- **风格负例过滤器**（SFT 前跑一遍）：目标回复里出现 markdown 标题/有序列表、"作为一个 AI/助手"、"我可以帮你"、"很高兴为您服务"、超长分点回答的样本直接丢弃。目标回复长度按 IM 分布截断：建议人类侧中位数 5–25 token，长回复（>128 token）占比 < 5%。
+
+### 4.2 超参
+
+- 全部参数可训练，ViT 学习率为 LLM 的 0.5 倍（跳过 align 时用 `--train llm`）；
+  lr 1e-4–2e-4（基座没有任何指令数据时取 2e-4；数据少、担心过拟合取 1e-4），warmup 3%，
+  1–3 个 epoch，MTP 权重 0.1，seq_len 1024（会话语料普遍超长时用 2048）。
+- **务必混入纯文本对话数据**：本定位下纯文本应占 ≥ 70%，可选的对话内图像数据不超过 30%；否则文本对话能力会退化成"看图说话"。
+- 数据量小时优先加数据多样性，而不是加 epoch；用 §6 的验证集监控过拟合。
+
+### 4.3 身份与"像人"的行为
+
+- 训练语料里不出现任何 AI 自我描述，也不要给模型固定名字；模型的身份完全由 `system` 决定。
+- 允许并鼓励"人类才有"的行为：短回复、连发多条消息、语气词（哈哈哈 / xswl / 草）、emoji、
+  答非所问、偶尔不耐烦、记不清之前说过的话。
+- `system` 只写人设（身份、口吻、与对方的关系、禁区），不写"你是 AI 助手"。
+
+### 4.4 越界拒答（"我不会，你问 AI"）
+
+- 目标行为：被要求解数学/物理题、写代码项目、给医疗/法律等专业结论时，用**人类口吻**表示不会，并建议去问 AI。例：「这题我真不会，你问 AI 吧」「这个得找医生看，我哪懂这个」「写代码我不行，你让 AI 给你写」。
+- 不能出现的措辞：「作为 AI 我无法…」「我是一个语言模型…」——那会直接暴露 AI 身份并破坏人设。
+- 构造方式：用一个覆盖各领域的越界 prompt 库（数学/物理/代码/医疗/法律/长文写作等）配 1–3 条符合人设的口语化回复；这些样本同时带上人设，避免学成"万能拒答机"。
+- 配比 2–8%。太少会残留"尝试解题"的行为（在 130M 上表现为胡编），太多会让日常闲聊也拒答。
+
+### 4.5 常见失败模式
+
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| 又变成助理腔 | SFT 混了 VQA / 指令数据，或 `system` 里写了"助手" | 清洗数据；检查 `system` 模板 |
+| 回复越来越长 | 目标回复长度分布没控住 | 按 IM 长度分布过滤/截断；提高短回复样本比例 |
+| 人设漂移（名字/性别前后不一致） | 无人设预设，或预设太弱 | 部署固定 persona；多轮样本里重复人设细节 |
+| 什么都拒答 | 拒答比例过高或模板单一 | 降低比例、增加模板多样性、混入正常闲聊 |
+| 复读、答非所问 | 语料重复太多 / lr 太大 | 扩充语料种类、降 lr、早停 |
 
 ## 5. 数据准备
 
 ```bash
-# 0. tokenizer：32k BPE，中英 + 代码
+# 0. tokenizer：32k BPE，建议在对话 + 通识上训练
 python scripts/train_tokenizer.py --out tokenizer \
-    --source "hf:HuggingFaceFW/fineweb-edu:text:sample-10BT:train@300000" --source "jsonl:data/zh/*.jsonl:text@300000"
+    --source "jsonl:data/chat/*.jsonl:text@300000" --source "jsonl:data/wiki/*.jsonl:text@100000"
 
 # 1. 每个来源单独 tokenize，训练时再用权重混合，改配比不必重新 tokenize
-python scripts/prepare_data.py --tokenizer tokenizer --source "jsonl:data/zh/*.jsonl:text" \
-    --out data/bin/zh --max_tokens 1800000000 --val_tokens 4000000
+python scripts/prepare_data.py --tokenizer tokenizer --source "jsonl:data/chat/*.jsonl:text" \
+    --out data/bin/chat --max_tokens 1500000000 --val_tokens 4000000
+
+# 2. 预训练
+python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
+    --data data/bin/chat:0.55,data/bin/fiction:0.20,data/bin/roleplay:0.12,data/bin/wiki:0.13 \
+    --tokens 3e9 --resume
+
+# 3.（可选）视觉对齐
+python scripts/train.py --stage align --tokenizer tokenizer --init_from runs/pretrain/final \
+    --out_dir runs/align --mm_data data/mm/chat_image.jsonl --image_root data/mm/images --epochs 1 --resume
+
+# 4. 对话 / 角色扮演 SFT：人类对话 + 人设 + 少量越界拒答
+#    跳过视觉对齐时：--init_from runs/pretrain/final --train llm（数据须为纯文本）
+python scripts/train.py --stage sft --tokenizer tokenizer \
+    --init_from runs/align/final --out_dir runs/sft --train llm \
+    --mm_data data/sft/human_dialog.jsonl,data/sft/persona.jsonl,data/sft/refuse.jsonl \
+    --epochs 2 --lr 2e-4 --resume
 ```
 
 - `--source` 支持 `hf:`（流式 datasets）、`jsonl:`、`parquet:` 等来源，末尾 `@N` 限制文档数；
   文档之间用 `<|endoftext|>` 分隔，产物是扁平 uint16 token 流 + `meta.json`。
-- `--val_tokens` 会把前 N 个 token 切给 `val.bin`；训练时定期在验证集上打印 `loss` / `ppl`。
-- 训练时用 `--data dirA:0.5,dirB:0.3,...` 指定混合权重（见阶段 1 的配比）。
-- 真实数据跑之前先跑 `bash scripts/smoke_test.sh` 合成数据冒烟（见 [`AGENTS.md`](../AGENTS.md)）。
+- `--val_tokens` 会把前 N 个 token 切给 `val.bin`；训练时定期在验证集上打印 `loss` / `ppl`。对话模型的
+  ppl 只能当作"没训崩"的 sanity check，选型看 §6。
+- `--mm_data` 可以只给纯文本 jsonl；只有带 `"image"` 字段的记录才需要 `--image_root`。
 
-## 6. 训练开关
+## 6. 评测
+
+这个定位下，损失/ppl 不作为选型依据。至少覆盖：
+
+| 维度 | 指标 | 做法 |
+|---|---|---|
+| 语言自然度 | 人类盲测胜率 | 同一上下文，人写回复 vs 模型回复，双盲二选一；目标是接近 50% 分不出 |
+| 人设一致性 | 身份问答一致率 | 同一 persona 多轮问名字/年龄/职业；无人设时统计各会话给出的身份分布（应接近语料先验，且**不**出现 AI 自述） |
+| 越界拒答 | 拒答率 / 误拒率 | 越界 prompt 库（数学/物理/代码/医疗/法律）上的拒答率，以及日常闲聊被误拒的比例 |
+| IM 形态 | 回复长度分布、助理腔词命中 | 与人类对话的长度分位数对比；统计"作为一个 AI / 我可以帮你 / 很高兴为您服务"等模式词 |
+| 端侧成本 | 首 token 延迟、decode tok/s、峰值内存 | 在目标设备（手机/NPU）实测 |
+
+自动指标只在回归时看趋势，不作发布门槛；人工盲测和越界拒答率才是。
+
+## 7. 端侧推理
+
+- **参数量**：推理只加载 LLM 主干 **116.65M**（纯文本）或 **131.0M**（含视觉塔）；MTP 块只用于训练，推理不加载。
+- **会话内存**：20 层里 15 层是 Gated DeltaNet，状态大小固定、不随对话轮数增长；只有 5 层 GQA 全注意力需要 KV。长会话的内存增长因此远小于同等规模的纯 Transformer，适合端侧常驻。
+- **短回复**：IM 风格本身就意味着 32–128 token 的输出，decode 是主要成本；建议
+  `max_new_tokens ≤ 128`，并用 persona 约束回答长度。
+
+## 8. 训练开关
 
 | 参数 | 说明 |
 |---|---|
@@ -70,4 +185,4 @@ python scripts/prepare_data.py --tokenizer tokenizer --source "jsonl:data/zh/*.j
 | `--schedule cosine` / `--decay_frac` / `--min_lr_ratio` | 调度器选择与衰减比例 |
 | `--resume` | 从 `out_dir/last` 续训，含数据顺序与 GradScaler 状态 |
 | `--eval_every` / `--eval_batches` / `--save_every` / `--log_every` | 验证频率与批次、保存与日志频率 |
-| `--precision` / `--gdn_impl` / `--grad_ckpt` / `--ce_ckpt` / `--compile` / `--tf32` | 精度与 kernel，见[架构 §3.3](architecture.md#33-精度与-kernel) |
+| `--precision` / `--gdn_impl` / `--grad_ckpt` / `--ce_ckpt` / `--compile` / `--tf32` | 精度与 kernel |

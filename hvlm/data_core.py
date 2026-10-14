@@ -68,7 +68,9 @@ class TokenMixer:
 # ----------------------------------------------------------------------------------------------
 # chat / multimodal formatting
 # ----------------------------------------------------------------------------------------------
-ROLE_MAP = {"human": "user", "user": "user", "gpt": "assistant", "assistant": "assistant", "system": "system"}
+# The imitated speaker is role "self": the model is a human chat partner, not an assistant.  "gpt" (LLaVA)
+# and "self" are the accepted input spellings;
+ROLE_MAP = {"human": "user", "user": "user", "gpt": "self", "self": "self", "system": "system"}
 
 
 def normalize_messages(rec):
@@ -85,7 +87,7 @@ def normalize_messages(rec):
 
 
 def encode_conversation(encode, sp, messages, n_img_tokens, has_image, max_len):
-    """ChatML-style encoding with loss only on assistant replies (+ their <|im_end|>).
+    """ChatML-style encoding with loss only on the imitated side's replies (role "self", + its <|im_end|>).
 
     encode : callable str -> list[int]   (plain text, no special tokens added)
     sp     : dict with ids for im_start, im_end, vision_start, vision_end, image_pad
@@ -101,7 +103,7 @@ def encode_conversation(encode, sp, messages, n_img_tokens, has_image, max_len):
         head = [sp["im_start"]] + encode(role + "\n")
         ids += head
         labels += [-100] * len(head)
-        if role == "assistant":
+        if role == "self":
             body = encode(content) + [sp["im_end"]]
             ids += body
             labels += body

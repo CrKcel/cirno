@@ -7,6 +7,6 @@
 | 文档 | 内容 |
 |---|---|
 | [模型架构](doc/architecture.md) | 模型设计、参数量、显存控制手段、实测吞吐、精度与 kernel |
-| [训练规划](doc/training.md) | 三阶段训练、数据准备、常用开关 |
+| [训练规划](doc/training.md) | 三阶段训练、数据准备、评测 |
 | [开发进度](doc/progress.md) | 完成的部分与待办事项 |
 | [AGENTS.md](AGENTS.md) | 仓库结构和安装、运行命令 |

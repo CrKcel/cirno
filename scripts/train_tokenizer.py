@@ -28,7 +28,7 @@ SPLIT_REGEX = (r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[
 
 CHAT_TEMPLATE = (
     "{% for m in messages %}{{ '<|im_start|>' + m['role'] + '\\n' + m['content'] + '<|im_end|>' + '\\n' }}{% endfor %}"
-    "{% if add_generation_prompt %}{{ '<|im_start|>assistant\\n' }}{% endif %}"
+    "{% if add_generation_prompt %}{{ '<|im_start|>self\\n' }}{% endif %}"
 )
 
 

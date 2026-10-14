@@ -68,20 +68,22 @@ ids, lab, used = encode_conversation(enc, sp, msgs, n_img, True, 512)
 trained = [t for t, l in zip(ids, lab) if l != -100]
 expected = enc("A cat.") + [2] + enc("Grey.") + [2]
 check("image used and 49 image tokens in order", used and ids.count(5) == 49 and ids[ids.index(3) + 1:ids.index(3) + 50] == [5] * 49 and ids[ids.index(3) + 50] == 4)
-check("loss only on assistant text + <|im_end|>", trained == expected)
+check("loss only on self (imitated) text + <|im_end|>", trained == expected)
 check("labels never point at image/vision tokens", all(l not in (3, 4, 5) for l in lab))
 check("sequence starts with <|im_start|>user", ids[:1] == [1] and ids[1:1 + len(enc("user\n"))] == enc("user\n"))
 
 ids2, lab2, used2 = encode_conversation(enc, sp, normalize_messages({"messages": [
-    {"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}]}), n_img, False, 512)
+    {"role": "user", "content": "hi"}, {"role": "self", "content": "yo"}]}), n_img, False, 512)
 check("text-only record has no image tokens", not used2 and 5 not in ids2)
+check("'gpt' input maps to role self",
+      normalize_messages({"messages": [{"role": "gpt", "content": "x"}]})[0]["role"] == "self")
 
 ids3, _, used3 = encode_conversation(enc, sp, normalize_messages({"messages": [
-    {"role": "user", "content": "describe"}, {"role": "assistant", "content": "ok"}]}), n_img, True, 512)
+    {"role": "user", "content": "describe"}, {"role": "self", "content": "ok"}]}), n_img, True, 512)
 check("image without <image> tag is prepended to first user turn", used3 and ids3[len(enc("user\n")) + 1] == 3)
 
 ids4, _, used4 = encode_conversation(enc, sp, normalize_messages({"messages": [
-    {"role": "user", "content": "<image> x"}, {"role": "assistant", "content": "ok"}]}), n_img, False, 512)
+    {"role": "user", "content": "<image> x"}, {"role": "self", "content": "ok"}]}), n_img, False, 512)
 check("<image> tag without an image is dropped", not used4 and 5 not in ids4)
 
 try:
@@ -97,7 +99,7 @@ except ValueError:
 
 # ---- collate ---------------------------------------------------------------------------------
 a = encode_conversation(enc, sp, msgs, n_img, True, 512)[:2]
-b = encode_conversation(enc, sp, normalize_messages({"messages": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}]}), n_img, False, 512)[:2]
+b = encode_conversation(enc, sp, normalize_messages({"messages": [{"role": "user", "content": "hi"}, {"role": "self", "content": "yo"}]}), n_img, False, 512)[:2]
 ids_b, lab_b, pos = collate_sequences([a, b], pad_id=6, image_pad_id=5, grid=7)
 T = max(len(a[0]), len(b[0]))
 check("collate shapes", ids_b.shape == (2, T) and lab_b.shape == (2, T) and pos.shape == (3, 2, T))

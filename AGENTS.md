@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 Cirno-130M is a ~130M-parameter hybrid vision-language model (Gated DeltaNet + Gated Attention)
-in Python/PyTorch.
+in Python/PyTorch, positioned as an **on-device chat / role-play model** rather than a general assistant.
 
 ## Project Structure & Module Organization
 
@@ -16,9 +16,9 @@ in Python/PyTorch.
 - `configs/` — `hvlm_130m.json` model config. `data/` and `runs/` hold generated artifacts and are
   gitignored.
 - `doc/` — the long-form docs: `architecture.md` (model design, parameter count, memory and
-  throughput, precision/kernel choices), `training.md` (the three training stages, data prep,
-  training flags), `progress.md` (what is done, known limitations, TODO). Keep them in sync with the
-  code; `README.md` is only an index into them.
+  throughput, precision/kernel choices), `training.md` (design positioning, the three training
+  stages, data prep, evaluation, edge inference, training flags), `progress.md` (what is done, known
+  limitations, TODO). Keep them in sync with the code.
 
 `hvlm/__init__.py` loads model classes lazily; keep torch imports out of `positions.py` and
 `data_core.py`.
@@ -39,23 +39,28 @@ bash scripts/run_pipeline.sh                # full training recipe
 
 ## Usage
 
-The whole pipeline is three stages — `pretrain` (text), `align` (vision, LLM frozen), `sft`
-(instruction/VQA) — driven by `scripts/train.py --stage <stage>`; see `doc/training.md` for the
-per-stage hyperparameters and `doc/architecture.md` for the memory/throughput trade-offs.
+The whole pipeline is three stages — `pretrain` (text), `align` (vision, LLM frozen; optional, only
+when the deployment sees images) and `sft` (dialogue / role-play fine-tuning on human-to-human
+conversations) — driven by `scripts/train.py --stage <stage>`; see `doc/training.md` for the
+positioning, per-stage hyperparameters and evaluation, and `doc/architecture.md` for the
+memory/throughput trade-offs.
 
 ```bash
-# tokenizer -> per-source token bins -> pretrain -> align -> sft -> sample
-python scripts/train_tokenizer.py --out tokenizer --source "hf:HuggingFaceFW/fineweb-edu:text:sample-10BT:train@300000"
-python scripts/prepare_data.py --tokenizer tokenizer --source "jsonl:data/zh/*.jsonl:text" --out data/bin/zh --max_tokens 1800000000 --val_tokens 4000000
+# tokenizer -> per-source token bins -> pretrain -> (optional) align -> sft -> sample
+python scripts/train_tokenizer.py --out tokenizer --source "jsonl:data/chat/*.jsonl:text@300000"
+python scripts/prepare_data.py --tokenizer tokenizer --source "jsonl:data/chat/*.jsonl:text" --out data/bin/chat --max_tokens 1500000000 --val_tokens 4000000
 python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
-    --data data/bin/en:0.50,data/bin/zh:0.30,data/bin/code:0.12,data/bin/math:0.08 \
-    --tokens 6e9 --resume
+    --data data/bin/chat:0.55,data/bin/fiction:0.20,data/bin/roleplay:0.12,data/bin/wiki:0.13 \
+    --tokens 3e9 --resume
 python scripts/train.py --stage align --tokenizer tokenizer --init_from runs/pretrain/final --out_dir runs/align \
-    --mm_data data/mm/caption.jsonl --image_root data/mm/images --epochs 1 --resume
+    --mm_data data/mm/chat_image.jsonl --image_root data/mm/images --epochs 1 --resume
 python scripts/train.py --stage sft --tokenizer tokenizer --init_from runs/align/final --out_dir runs/sft \
-    --mm_data data/mm/sft_vqa.jsonl,data/text/sft_chat.jsonl --image_root data/mm/images --epochs 2 --resume
-python scripts/sample.py --model runs/sft/final --prompt "Describe this image." --image example.jpg
+    --train llm --mm_data data/sft/human_dialog.jsonl,data/sft/persona.jsonl,data/sft/refuse.jsonl --epochs 2 --resume
+python scripts/sample.py --model runs/sft/final --prompt "在吗" --max_new_tokens 32
 ```
+
+To skip the vision stage (text-only chat), drop the `align` line and use
+`--init_from runs/pretrain/final --train llm` for `sft` with pure-text data.
 
 `bash scripts/run_pipeline.sh` runs the same recipe end to end; edit its DATA section for real
 corpora. Each stage writes `out_dir/last` (weights + optimizer + GradScaler state, used by

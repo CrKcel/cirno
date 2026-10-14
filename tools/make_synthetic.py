@@ -76,7 +76,7 @@ def main():
                 {"from": "human", "value": f"<image>\n{q}"}, {"from": "gpt", "value": ans}]}, ensure_ascii=False) + "\n")
             if i % 5 == 0:
                 fs.write(json.dumps({"messages": [{"role": "user", "content": "Say hello."},
-                                                  {"role": "assistant", "content": "Hello! How can I help you today?"}]}) + "\n")
+                                                  {"role": "self", "content": "Hi! What's up?"}]}) + "\n")
     print("wrote", a.out)
 
 
