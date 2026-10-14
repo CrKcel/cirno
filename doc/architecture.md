@@ -4,16 +4,6 @@ Cirno-130M 是一个约 130M 参数的混合视觉语言模型：20 层 decoder 
 : 1 层 Gated Attention（全注意力）** 交替，外挂一个 6 层 ViT 和一个 MTP 块。所有超参都在
 [`configs/hvlm_130m.json`](../configs/hvlm_130m.json) 里。
 
-对应实现：
-
-| 文件 | 内容 |
-|---|---|
-| [`hvlm/modeling_hvlm.py`](../hvlm/modeling_hvlm.py) | 模型主体、ViT、MTP 块、分块交叉熵 |
-| [`hvlm/gated_delta.py`](../hvlm/gated_delta.py) | delta rule 与 kernel 分派（`torch` / `fla` / `auto`） |
-| [`hvlm/configuration_hvlm.py`](../hvlm/configuration_hvlm.py) | `HVLMConfig` / `HVLMVisionConfig` |
-| [`hvlm/positions.py`](../hvlm/positions.py) | 交错式 M-RoPE 位置计算（numpy，无 torch） |
-| [`hvlm/data_core.py`](../hvlm/data_core.py) | 采样顺序、打包窗口等数据核心逻辑（numpy，无 torch） |
-
 ## 1. 模型设计
 
 | 项 | 配置 | 说明 |
