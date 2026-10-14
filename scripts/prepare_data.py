@@ -5,13 +5,21 @@
         --source "hf:HuggingFaceFW/fineweb-edu:text:sample-10BT:train" --max_tokens 1200000000 --val_tokens 4000000
 
 `--source` takes any source spec from common_io.py (jsonl / parquet / txt / hf, with the `-`, `a.b` and
-`a+b` field forms) and may be suffixed with `@N` to use only the first N documents, e.g.
-    --source "hf:silver/lccc:-:base:train@2000000"        # LCCC conversations as whole documents
-    --source "hf:liwu/MNBVC:主题+回复.回复:forum:train"     # forum threads: title + replies
+`a+b` field forms) and may be suffixed with `@N` to use only the first N documents.  It is **repeatable**:
+several sources go into the same bucket and share one `--max_tokens` budget, read in the order given, e.g.
+    --source "parquet:hf://datasets/silver/lccc@refs/convert/parquet/base/train/*.parquet:dialog"
+    --source "hf:chenrm/anime-subtitles:data:default:train"
+
+`parquet:` also takes remote `hf://` globs, which is how a script-only dataset is read under
+`datasets` >= 4 (see common_io.py). `--desegment` removes the spaces a word-segmented corpus puts
+between Chinese tokens - LCCC's `dialog` field needs it, or the model learns to answer with spaces
+between characters.
 
 Output directory: train_0000.bin, train_0001.bin, ... (about --shard_tokens each), val.bin and meta.json.
 Run it once per data source (English / Chinese / code / math ...) and mix them at training time with
 `train.py --data dir_a:0.5,dir_b:0.3,...` - mixing weights can then be changed without re-tokenising.
+The reported `train_tokens` is what the mixture weights have to be checked against: a bucket weighted
+above its own token count is a bucket the mixer repeats.
 """
 import argparse
 import json
@@ -22,21 +30,25 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(__file__))
-from common_io import iter_texts, split_limit  # noqa: E402
+from common_io import desegment_cjk, iter_texts, split_limit  # noqa: E402
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--tokenizer", required=True)
-    ap.add_argument("--source", required=True, help="source spec (see common_io.py), optionally suffixed with @max_docs")
+    ap.add_argument("--source", action="append", required=True,
+                    help="source spec (see common_io.py), optionally suffixed with @max_docs; repeatable, "
+                         "sources are read in the order given until --max_tokens is reached")
     ap.add_argument("--out", required=True)
     ap.add_argument("--max_tokens", type=int, default=None)
     ap.add_argument("--val_tokens", type=int, default=0, help="the first N tokens go to val.bin")
     ap.add_argument("--shard_tokens", type=int, default=100_000_000)
     ap.add_argument("--batch_docs", type=int, default=512)
     ap.add_argument("--max_doc_chars", type=int, default=200_000)
+    ap.add_argument("--desegment", action="store_true",
+                    help="remove spaces between CJK tokens (word-segmented corpora such as LCCC's dialog)")
     args = ap.parse_args()
-    spec, max_docs = split_limit(args.source)
+    specs = [split_limit(s) for s in args.source]
 
     from transformers import AutoTokenizer
 
@@ -86,23 +98,34 @@ def main():
         write(np.asarray(out, dtype=np.int64))
         buf = []
 
-    for text in iter_texts(spec, max_docs):
-        buf.append(text[: args.max_doc_chars])
-        n_docs += 1
-        if len(buf) >= args.batch_docs:
-            flush()
-            seen = state["total"] + state["val"]
-            if (n_docs // args.batch_docs) % 20 == 0:
-                print(f"{n_docs} docs, {seen / 1e6:.1f}M tokens, {seen / (time.time() - t0):.0f} tok/s", flush=True)
-            if args.max_tokens and seen >= args.max_tokens:
-                break
+    # Sources are consumed in the order given and share one budget, so the cap decides how deep into the
+    # list we get: `--source zinc --source fineweb` gives zinc priority.  A cap reached inside a source
+    # stops everything after it.
+    for spec, max_docs in specs:
+        if args.max_tokens and state["total"] + state["val"] >= args.max_tokens:
+            break
+        seen_before = n_docs
+        for text in iter_texts(spec, max_docs):
+            buf.append((desegment_cjk(text) if args.desegment else text)[: args.max_doc_chars])
+            n_docs += 1
+            if len(buf) >= args.batch_docs:
+                flush()
+                seen = state["total"] + state["val"]
+                if (n_docs // args.batch_docs) % 20 == 0:
+                    print(f"{n_docs} docs, {seen / 1e6:.1f}M tokens, {seen / (time.time() - t0):.0f} tok/s", flush=True)
+                if args.max_tokens and seen >= args.max_tokens:
+                    break
+        if n_docs == seen_before:
+            print(f"WARNING: source yielded no usable document: {spec!r}", flush=True)
     flush()
+    if state["total"] + state["val"] == 0:
+        raise SystemExit(f"no tokens produced - every source was empty or unusable: {args.source!r}")
     if shard_f is not None:
         shard_f.close()
     if val_f is not None:
         val_f.close()
     meta = dict(train_tokens=state["total"], val_tokens=state["val"], shards=state["shard"] + 1,
-                vocab_size=len(tok), dtype="uint16", source=args.source)
+                vocab_size=len(tok), dtype="uint16", source=",".join(args.source))
     json.dump(meta, open(os.path.join(args.out, "meta.json"), "w"), indent=1)
     print(meta)
 

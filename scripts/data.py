@@ -10,7 +10,7 @@ from torch.utils.data import Dataset
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
-from common_io import iter_records  # noqa: E402
+from common_io import desegment_cjk, iter_records  # noqa: E402
 from hvlm.data_core import (TokenMixer, collate_sequences, encode_conversation,  # noqa: E402
                             normalize_messages)
 
@@ -104,7 +104,8 @@ class ChatDataset(Dataset):
     common_io.py) are spooled into `cache_dir` first.  Images are loaded lazily; unusable records (unknown
     role, missing image, truncated image block, ...) are skipped by falling through to the next record."""
 
-    def __init__(self, sources, image_root, tokenizer, max_len, vision_cfg, token_ids, cache_dir="data/cache"):
+    def __init__(self, sources, image_root, tokenizer, max_len, vision_cfg, token_ids, cache_dir="data/cache",
+                 desegment=False):
         self.files = [s for s in sources if not is_source_spec(s)]
         specs = [s for s in sources if is_source_spec(s)]
         if specs:
@@ -122,13 +123,14 @@ class ChatDataset(Dataset):
         self.max_len = max_len
         self.vc = vision_cfg
         self.sp = token_ids  # dict: im_start, im_end, vision_start, vision_end, image_pad
+        self.desegment = desegment  # LCCC-style word-segmented turns (see common_io.desegment_cjk)
         self.skipped = 0
 
     def __len__(self):
         return len(self.offsets)
 
     def _encode(self, s):
-        return self.tok(s, add_special_tokens=False)["input_ids"]
+        return self.tok(desegment_cjk(s) if self.desegment else s, add_special_tokens=False)["input_ids"]
 
     def _load(self, idx):
         fi, off = self.offsets[idx]

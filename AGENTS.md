@@ -48,10 +48,10 @@ memory/throughput trade-offs.
 
 ```bash
 # tokenizer -> per-source token bins -> pretrain -> (optional) align -> sft -> sample
-python scripts/train_tokenizer.py --out tokenizer --source "jsonl:data/chat/*.jsonl:text@300000"
-python scripts/prepare_data.py --tokenizer tokenizer --source "jsonl:data/chat/*.jsonl:text" --out data/bin/chat --max_tokens 1500000000 --val_tokens 4000000
+python scripts/train_tokenizer.py --out tokenizer --desegment --source "jsonl:data/chat/*.jsonl:text@5000000"
+python scripts/prepare_data.py --tokenizer tokenizer --desegment --source "jsonl:data/chat/*.jsonl:text" --out data/bin/chat --max_tokens 1350000000 --val_tokens 4000000
 python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
-    --data data/bin/chat:0.55,data/bin/fiction:0.20,data/bin/roleplay:0.12,data/bin/wiki:0.13 \
+    --data data/bin/chat:0.45,data/bin/en_chat:0.05,data/bin/fiction:0.20,data/bin/long:0.15,data/bin/wiki:0.145,data/bin/roleplay:0.005 \
     --tokens 3e9 --resume
 python scripts/train.py --stage align --tokenizer tokenizer --init_from runs/pretrain/final --out_dir runs/align \
     --mm_data data/mm/chat_image.jsonl --image_root data/mm/images --epochs 1 --resume

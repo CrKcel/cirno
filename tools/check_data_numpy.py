@@ -8,7 +8,9 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
-from common_io import field_text, split_limit  # noqa: E402
+from common_io import WHOLE, _split_file_spec, desegment_cjk, field_text, iter_texts, split_limit  # noqa: E402
+from tokenizers import Regex, pre_tokenizers  # noqa: E402
+from train_tokenizer import SPLIT_REGEX  # noqa: E402
 from hvlm.data_core import (TokenMixer, collate_sequences, encode_conversation,  # noqa: E402
                             normalize_messages, sample_order)
 
@@ -152,6 +154,48 @@ try:
     check("unrecognised record shape is rejected", False)
 except ValueError:
     check("unrecognised record shape is rejected", True)
+
+# ---- source specs ----------------------------------------------------------------------------
+# A remote glob keeps its scheme, so the `hf` in front of `://` is not mistaken for the glob and a
+# trailing `:field` is still split off.  Getting this wrong silently reads the wrong files.
+check("remote parquet spec keeps its scheme and splits the field",
+      _split_file_spec("hf://datasets/o/n@refs/convert/parquet/base/train/*.parquet:dialog")
+      == ("hf://datasets/o/n@refs/convert/parquet/base/train/*.parquet", "dialog"))
+check("remote parquet spec without a field is all glob",
+      _split_file_spec("hf://datasets/o/n@rev/x/*.parquet") == ("hf://datasets/o/n@rev/x/*.parquet", WHOLE))
+check("local glob spec still splits the field",
+      _split_file_spec("data/x/*.parquet:text") == ("data/x/*.parquet", "text"))
+check("'@' inside a remote path is not read as a document limit",
+      split_limit("parquet:hf://datasets/o/n@refs/convert/parquet/x/*.parquet:dialog")[1] is None)
+
+# A glob that matches nothing used to tokenise to an empty bin with exit status 0, so a typo in a spec
+# (e.g. `.../convert/parquet/<config>/train/*` for a dataset that only has `partial-train`) looked like
+# "the corpus is small" instead of an error.
+try:
+    list(iter_texts("jsonl:/nonexistent-dir-xyz/*.jsonl:text"))
+    check("a glob matching no file fails loudly", False)
+except FileNotFoundError as e:
+    check("a glob matching no file fails loudly", "matched no files" in str(e))
+
+# ---- de-segmentation -------------------------------------------------------------------------
+# LCCC ships its dialog pre-segmented.  Training on it uncorrected teaches the model to put spaces
+# between characters, so the join has to happen, and it must not eat English word spacing.
+check("segmented Chinese is rejoined",
+      desegment_cjk("你 去 那儿 竟然 不喊 我 生气 了 ， 快点 给 我 道歉") == "你去那儿竟然不喊我生气了，快点给我道歉")
+check("CJK/Latin boundary loses its space, Latin/Latin keeps it",
+      desegment_cjk("我用 SEED.24 小时 签到") == "我用SEED.24小时签到")
+check("English spaces survive", desegment_cjk("no cjk here  at all") == "no cjk here  at all")
+check("newlines still separate turns", desegment_cjk("第一 行\n第二 行") == "第一行\n第二行")
+
+# ---- tokenizer pre-split ---------------------------------------------------------------------
+# Digit runs must stay whole: Qwen2 splits them one at a time to help arithmetic, which this model does
+# not do, and chat is full of numbers (`25岁`, `100块`).  The regex uses \p{...}, so Python's own `re`
+# cannot even compile it - the same `tokenizers` pre-tokenizer the trainer uses has to answer.
+_split = pre_tokenizers.Split(Regex(SPLIT_REGEX), behavior="isolated", invert=False)
+pieces = [p[0] for p in _split.pre_tokenize_str("2024年12月")]
+check("digit runs are not split one by one", "2024" in pieces and "12" in pieces, f"({pieces})")
+check("letters are still split off a trailing digit",
+      [p[0] for p in _split.pre_tokenize_str("gpt4")] == ["gpt", "4"])
 
 print("\nALL PASS" if ok else "\nSOME CHECKS FAILED")
 sys.exit(0 if ok else 1)

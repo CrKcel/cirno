@@ -5,7 +5,10 @@ safetensors
 numpy
 pillow
 pyarrow         # only for parquet sources
-datasets        # only for hf: streaming sources
+fsspec          # only for remote parquet sources (parquet:hf://... globs); also pulled in by datasets
+datasets        # only for hf: streaming sources.  >= 4 dropped loading-script support, which is why
+                # LCCC / MNBVC / DailyDialog go through the `parquet:hf://...@refs/convert/parquet/...`
+                # form instead of `hf:` (see doc/datasets.md 1)
 flash-linear-attention  # Triton kernels for the Gated DeltaNet layers (CUDA only; ~1.7x end-to-end).
                         # --gdn_impl auto (the default) picks them up when present and silently falls
                         # back to pure PyTorch when they are missing or the shape is unsupported.

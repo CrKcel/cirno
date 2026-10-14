@@ -23,7 +23,15 @@ step 1-make-data "$PY" tools/make_synthetic.py --out "$WORK/data" --n_images 4 -
 step 2-tokenizer "$PY" scripts/train_tokenizer.py --out "$WORK/tok" --vocab_size 1024 \
     --source "jsonl:$WORK/data/text.jsonl:text@800"
 step 3-prepare   "$PY" scripts/prepare_data.py --tokenizer "$WORK/tok" \
-    --source "jsonl:$WORK/data/text.jsonl:text" --out "$WORK/bin" --max_tokens 120000 --val_tokens 1500
+    --source "jsonl:$WORK/data/text.jsonl:text" --source "jsonl:$WORK/data/text.jsonl:text" \
+    --out "$WORK/bin" --max_tokens 120000 --val_tokens 1500
+# --source is repeatable; a regression to a plain (non-append) argument silently drops every source but
+# the last, which would just look like "less data" everywhere else.  meta.json is where it shows up.
+"$PY" - "$WORK/bin/meta.json" <<'EOF'
+import json, sys
+src = json.load(open(sys.argv[1]))["source"]
+assert src.count(",") == 1, f"prepare_data --source is not appendable any more: {src!r}"
+EOF
 step 4-pretrain  "$PY" scripts/train.py --stage pretrain --tokenizer "$WORK/tok" --out_dir "$WORK/pretrain" \
     --data "$WORK/bin" --max_steps 3 --seq_len 512 --micro_batch 4 --grad_accum 2 --log_every 1 --workers 0
 drop() { [ -n "${KEEP:-}" ] || rm -rf "$@"; }
