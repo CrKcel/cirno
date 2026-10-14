@@ -11,7 +11,8 @@ in Python/PyTorch, positioned as an **on-device chat / role-play model** rather 
 - `scripts/` — CLI entry points: `train_tokenizer.py`, `prepare_data.py`, `train.py`, `sample.py`,
   plus the `smoke_test.sh` and `run_pipeline.sh` orchestration scripts.
 - `tools/` — standalone estimators and checks: `estimate.py`, `measure_batch.py`,
-  `check_algorithms_numpy.py`, `check_data_numpy.py`, `make_synthetic.py`.
+  `check_algorithms_numpy.py`, `check_data_numpy.py`, `make_synthetic.py`, `plan_mix.py` (derives the
+  three phase mixes from the bins' `meta.json`).
 - `tests/` — `test_model.py`, the torch test suite.
 - `configs/` — `hvlm_130m.json` model config. `data/` and `runs/` hold generated artifacts and are
   gitignored.
@@ -47,12 +48,19 @@ positioning, per-stage hyperparameters and evaluation, and `doc/architecture.md`
 memory/throughput trade-offs.
 
 ```bash
-# tokenizer -> per-source token bins -> pretrain -> (optional) align -> sft -> sample
-python scripts/train_tokenizer.py --out tokenizer --desegment --source "jsonl:data/chat/*.jsonl:text@5000000"
-python scripts/prepare_data.py --tokenizer tokenizer --desegment --source "jsonl:data/chat/*.jsonl:text" --out data/bin/chat --max_tokens 1350000000 --val_tokens 4000000
+# tokenizer -> per-source token bins -> pretrain (three phases) -> (optional) align -> sft -> sample
+python scripts/train_tokenizer.py --out tokenizer --desegment --source "jsonl:data/chat/*.jsonl:text@3200000"
+python scripts/prepare_data.py --tokenizer tokenizer --desegment --source "jsonl:data/chat/*.jsonl:text" --out data/bin/chat --max_tokens 884000000 --val_tokens 4000000
+# weights come from the bins' own meta.json (tools/plan_mix.py), so no bucket is read twice
 python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
-    --data data/bin/chat:0.45,data/bin/en_chat:0.05,data/bin/fiction:0.20,data/bin/long:0.15,data/bin/wiki:0.145,data/bin/roleplay:0.005 \
-    --tokens 3e9 --resume
+    --data data/bin/fiction:0.45,data/bin/long:0.35,data/bin/wiki:0.20 \
+    --tokens 0.9e9 --seq_len 2048 --decay_frac 0 --resume
+python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
+    --data data/bin/chat:0.2645,data/bin/en_chat:0.0777,data/bin/fiction:0.2378,data/bin/long:0.0689,data/bin/wiki:0.3511 \
+    --tokens 3.2e9 --seq_len 1024 --decay_frac 0 --resume
+python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
+    --data data/bin/chat:0.34,data/bin/en_chat:0.036,data/bin/fiction:0.28,data/bin/long:0.04,data/bin/wiki:0.284,data/bin/roleplay:0.0147,data/bin/roleplay_char:0.0044,data/bin/roleplay_catgirl:0.0002 \
+    --tokens 4.0e9 --seq_len 1024 --resume
 python scripts/train.py --stage align --tokenizer tokenizer --init_from runs/pretrain/final --out_dir runs/align \
     --mm_data data/mm/chat_image.jsonl --image_root data/mm/images --epochs 1 --resume
 python scripts/train.py --stage sft --tokenizer tokenizer --init_from runs/align/final --out_dir runs/sft \

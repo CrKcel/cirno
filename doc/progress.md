@@ -20,7 +20,9 @@
   `messages` / `conversations` / 整段对话列表 / `instruction→output` / PersonaChat 这几种开源数据集形状。
 - **训练**：单卡三阶段 trainer（`pretrain` / `align` / `sft`）、WSD 与 cosine 调度、`--resume` 续训
   （含数据顺序与 GradScaler 状态）、自动 mixed precision、按需梯度/CE 检查点（启动探针决定）、
-  可选 `torch.compile`、CUDA 分配器上限 `--max_mem_gb`。
+  可选 `torch.compile`、CUDA 分配器上限 `--max_mem_gb`。预训练是 4B token 的三段数据课程
+  （长文 seq 2048 → 对话 → 退火 + 角色扮演，见 `doc/training.md` §2），由三次 `--resume` run 编排：
+  `--tokens` 传累计目标，中间段用 `--decay_frac 0` 保持恒定 lr，接起来仍是一条完整的 WSD 曲线。
 - **推理**：`scripts/sample.py`（chat / `--raw` 续写、可选图像、temperature / top_k）；`hvlm.register()`
   可把模型注册进 transformers 的 Auto 类。
 - **工程**：numpy-only 检查脚本可在无 torch 环境跑；合成数据冒烟；`tools/measure_batch.py` 在本机重测
@@ -37,8 +39,14 @@
   `.ass`（见 `doc/datasets.md` §1），全量 11.43B 原始字符里只有 2.93B 是对白（25.6%）——不清洗等于把四分之
   三的字幕 token 预算花在 `[Script Info]` 头、样式表和覆盖标签上。集内还混着 16.3 亿字符的日语（假名占多
   数），`--zh-only` 丢掉这些整集、并顺带删掉中文集里的假名 OP/ED 行（3.6% 的行）；约半数字幕组出繁体，
-  `--t2s` 走 opencc 统一成简体（繁体标记字占比 4.74% → 0.33%）。产物 59,806 集 / 2.93B 字符 ≈ 2.0B token，
-  是 chat 桶的主力来源。
+  `--t2s` 走 opencc 统一成简体（繁体标记字占比 4.74% → 0.33%）。产物 59,806 集 / 2.93B 字符。
+  **两个还没处理的问题**：① `prepare_data` 的 `--max_doc_chars 200000` 之后只有 0.61B 字符能进桶，
+  1,470 篇被截断（最大 67 MB）；② 这些超长文档是卡拉OK 逐字行（`佐\n佐\n佐…`），既是字符数虚高的来源，
+  也是噪声，需要在 `clean_ass.py` 里丢掉单字重复行。做完这两步字幕才能按"全量对白"来算，chat 桶也才有
+  从 0.88B 扩到 1.3B 的空间。
+- **chat 桶是最紧的一环**：LCCC base+large 453M + 字幕有效 428M ≈ 0.88B token，按"每个桶一遍"的配方
+  chat 只占预算 22%。想把对话占比拉回 1/3，只能扩源：MNBVC 的 `forum`/`blog`（落本地 parquet）、修好
+  卡拉OK 问题后的字幕余量、播客/群聊转写。
 - **MNBVC 取不到**：它没有自动转换的 parquet 分支（`refs/convert/parquet` revision 不存在），所以
   `parquet:hf://` 也拿不到它——论坛语料暂时不可用。两条路：把 `datasets`
   钉到 3.x（回退加载脚本），或把 MNBVC 落成本地 parquet/jsonl 再喂。
@@ -58,16 +66,16 @@
   - `wikimedia/wikisource` 中文版是真公版书，但 **68% 偏文言文**（《中華民國憲法》《南京條約》《正氣歌》
     这类），对 IM 模型是风格污染；要用必须先筛出白话子集。
   - 现代出版中文小说有版权、开源界不存在；小说桶能上量的只有网文，所以"多来点人类写的小说"只能靠
-    在现有 20% 内替换提质，不能靠新增来源。
+    在小说桶内替换提质（1.176B token 就是网文 parquet 分支的全量），不能靠新增来源。
 - **分片顺序偏差**：`prepare_data` 按 `parquet:` glob 的排序顺序读、遇 `--max_tokens` 即停，而分片顺序
-  是有结构的——各源首/末片实测见 `doc/training.md` §5，wiki / baidu 的顺序截断反而有利，Fineweb-Edu 与
-  字幕则偏得很厉害。要处理的话两个方向：给 `parquet:` 的 `hf://` glob 加「按步长/随机挑分片」的能力
-  （如 `--shard_stride N` 或 spec 后缀 `@stride=N`），让 Fineweb-Edu `4_5` 取 1% 时能均匀覆盖 `CCI3` /
-  `OpenCSG-CC` / `map-cc`，而不是清一色 `CCI3`；同样能用在字幕按目录分组、网文按书排序这两处。或者这几
-  个桶先下全量再在上游采样——字幕反正要写清洗脚本，清洗时在全 60 片上采样即可。
+  是有结构的——各源首/末片实测见 `doc/training.md` §5，baidu 的顺序截断反而有利（取 90% 正好落在常见
+  实体上），Fineweb-Edu 与字幕则偏得很厉害。当前配方绕开了这个问题：长文桶按知乎的全部（0.51B）顶格，
+  Fineweb-Edu `4_5` 一档根本不进配方。要真正用上它（或按目录取字幕、按书取网文），得给 `parquet:` 的
+  `hf://` glob 加「按步长/随机挑分片」的能力（如 `--shard_stride N` 或 spec 后缀 `@stride=N`），
+  否则取 1% 就是清一色 `CCI3`；这几个桶也可以先下全量再在上游采样。
 - **LCCC base 与 large 有重叠**：实测在 large 的一个分片里检索 base 采样，直接命中 6.7%；按分片占比
   （2.8M/12M）折算，两者真实重叠约 **30%**。base 本来就是 large 的清洗子集，所以同时用两个来源会让
-  ~7% 的 chat 桶 token 是重复对话（1.29 遍的桶里再叠一层）。要在意就去重，或只用 large。
+  ~7% 的 chat 桶 token 是重复对话（一遍的桶里再叠一层）。要在意就去重，或只用 large。
 - **视觉输入**：固定 224×224 单图（等比填充成正方形）；不支持原生动态分辨率、多图交错与视频。
 - **视觉对齐**：ViT 从零训练（14.4M），未含对比学习/蒸馏预训练这一步，识别能力有限；纯文本部署可整个跳过 align 阶段。开源图文对话集（PhotoChat、聊天截图集，见 `doc/datasets.md` §3）把图片存在数据集内部，`--mm_data` 还指不过去，需要先把图导出到 `--image_root` 下。
 - **预训练细节**：按文档拼接打包，没有跨文档掩码；会话边界依赖 `<|endoftext|>` 与打包策略。
