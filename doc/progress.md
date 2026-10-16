@@ -20,7 +20,7 @@
   `messages` / `conversations` / 整段对话列表 / `instruction→output` / PersonaChat 这几种开源数据集形状。
 - **训练**：单卡三阶段 trainer（`pretrain` / `align` / `sft`）、WSD 与 cosine 调度、`--resume` 续训
   （含数据顺序与 GradScaler 状态）、自动 mixed precision、按需梯度/CE 检查点（启动探针决定）、
-  可选 `torch.compile`、CUDA 分配器上限 `--max_mem_gb`。预训练是 4B token 的三段数据课程
+  可选 `torch.compile`、CUDA 分配器上限 `--max_mem_gb`。预训练是 5.39B token 的三段数据课程
   （长文 seq 2048 → 对话 → 退火 + 角色扮演，见 `doc/training.md` §2），由三次 `--resume` run 编排：
   `--tokens` 传累计目标，中间段用 `--decay_frac 0` 保持恒定 lr，接起来仍是一条完整的 WSD 曲线。
 - **推理**：`scripts/sample.py`（chat / `--raw` 续写、可选图像、temperature / top_k）；`hvlm.register()`
@@ -43,21 +43,18 @@
   **两个还没处理的问题**：① `prepare_data` 的 `--max_doc_chars 200000` 之后只有 0.61B 字符能进桶，
   1,470 篇被截断（最大 67 MB）；② 这些超长文档是卡拉OK 逐字行（`佐\n佐\n佐…`），既是字符数虚高的来源，
   也是噪声，需要在 `clean_ass.py` 里丢掉单字重复行。做完这两步字幕才能按"全量对白"来算，chat 桶也才有
-  从 0.88B 扩到 1.3B 的空间。
-- **chat 桶是最紧的一环**：LCCC base+large 453M + 字幕有效 428M ≈ 0.88B token，按"每个桶一遍"的配方
-  chat 只占预算 22%。想把对话占比拉回 1/3，只能扩源：MNBVC 的 `forum`/`blog`（落本地 parquet）、修好
-  卡拉OK 问题后的字幕余量、播客/群聊转写。
+  从 1.01B 再往上扩的空间。
+- **chat 桶是最紧的一环**：LCCC base+large 453M + 字幕有效 428M + b-corpus `v-corpus-zh` ≈130M ≈ 1.01B
+  token，按"每个桶一遍"的配方 chat 只占预算 18.7%。想把对话占比拉回 1/3，只能扩源：修好卡拉OK 问题后的
+  字幕余量、播客/群聊转写。
 - **流行文化语料没有清洗脚本**：`Limour/b-corpus` 全量已归入六个桶（1,819 个文件 / 552.6 MB，新增
   ≈370M token，映射见 `doc/datasets.md` §1），但每个子目录都要同一个前置步骤：解压 `.txt.gz`、按行
   或按章、按场景切分、去掉 `角色名：`/`system：` 前缀，仓库里还混着 130 多个 `.py`/`.bat` 提取脚本；
   `互动小说`（mrzjy 3k，≈149M token）自标 uncleaned，且 `content_tag`/`role` 只能在落盘时丢掉；
-  `q-corpus` 是 R18，要逐篇筛。另外 `mrzjy/chinese_moegirl_wiki_corpus_raw` 是原始 wikitext
-  （实测 99.6% 的条目含 `[[`、91.5% 含 `{{`，Han 比例只有 0.34），要剥模板/表格/注释并按篇截断。
-  清洗落盘后按新的 `train_tokens` 用 `tools/plan_mix.py` 重算三段权重与各桶 `--max_tokens`。现状与
-  取法见 `doc/datasets.md` §1.1 / §1.5 / §1.7。
-- **MNBVC 取不到**：它没有自动转换的 parquet 分支（`refs/convert/parquet` revision 不存在），所以
-  `parquet:hf://` 也拿不到它——论坛语料暂时不可用。两条路：把 `datasets`
-  钉到 3.x（回退加载脚本），或把 MNBVC 落成本地 parquet/jsonl 再喂。
+  `q-corpus` 是 R18，要逐篇筛；`Miaowuawa/ChineseNovels` 整本一篇，要拆章，否则每本只进前 200k 字符；
+  `mrzjy/chinese_moegirl_wiki_corpus_raw` 是原始 wikitext，要剥模板/表格/注释并按篇截断。清洗落盘后按
+  新的 `train_tokens` 用 `tools/plan_mix.py` 重算三段权重与各桶 `--max_tokens`。现状与取法见
+  `doc/datasets.md` §1.1 / §1.5 / §1.7。
 - **英文对话清洗**：英文桶里**真人写的小集**各自带格式噪声，进桶前都要过一遍（逐集的字段/噪声说明见
   `doc/datasets.md` §1.2 英文对话表）；只有 SODA 干净，不用清洗。
 - **英文桶以合成语料为主**：SODA 是 InstructGPT 蒸馏出来的（`language_creators:machine-generated`），
@@ -69,23 +66,18 @@
   参数——`human_dialog.jsonl : persona.jsonl : refuse.jsonl` 的比例谁的行数多谁说了算，`doc/training.md`
   §4.4 要求的"拒答 2–8%"目前只能靠人工数行数落实。所以说"对话比例放到 SFT 调"在当前代码里**没有可调的
   旋钮**。需要补：给 SFT 来源加权重（或按目标比例重采样），并打一份各来源的行数/长度分布报告。
-- **百科与长文的语料质量问题**（都是实测出来的，进桶前要处理）：
-  - `wikimedia/wikipedia` 中文版 **400 篇里 366 篇繁简混用**，对简体 IM 模型会诱导输出繁体字，
-    需要一步繁→简统一（opencc）。
-  - `wikimedia/wikisource` 中文版是真公版书，但 **68% 偏文言文**（《中華民國憲法》《南京條約》《正氣歌》
-    这类），对 IM 模型是风格污染；要用必须先筛出白话子集。
-  - 现代出版中文小说有版权、开源界不存在；小说桶能上量的只有网文，所以"多来点人类写的小说"只能靠
-    在小说桶内替换提质（1.176B token 就是网文 parquet 分支的全量），不能靠新增来源。
+- **小说桶的来源限制**：现代出版中文小说有版权、开源界不存在；小说桶能上量的只有网文，所以"多来点
+  人类写的小说"只能靠在小说桶内替换提质（1.176B token 就是网文 parquet 分支的全量），不能靠新增来源。
 - **分片顺序偏差**：`prepare_data` 按 `parquet:` glob 的排序顺序读、遇 `--max_tokens` 即停，而分片顺序
-  是有结构的——各源首/末片实测见 `doc/training.md` §5，baidu 的顺序截断反而有利（取 90% 正好落在常见
-  实体上），Fineweb-Edu 与字幕则偏得很厉害。当前配方绕开了这个问题：长文桶按知乎的全部（0.51B）顶格，
-  Fineweb-Edu `4_5` 一档根本不进配方。要真正用上它（或按目录取字幕、按书取网文），得给 `parquet:` 的
-  `hf://` glob 加「按步长/随机挑分片」的能力（如 `--shard_stride N` 或 spec 后缀 `@stride=N`），
-  否则取 1% 就是清一色 `CCI3`；这几个桶也可以先下全量再在上游采样。
+  是有结构的——各源首/末片实测见 `doc/training.md` §5，baidu 的排序让"取前几片"正好落在常见实体上
+  （现在预算覆盖全池，整份读完），字幕则偏得很厉害（按目录分片，只取一部分就只有剧场版、没有 TV 系列）。
+  当前配方靠"字幕跑全 60 片、网文下全 10 片、预算覆盖各桶池子"绕开这个问题；要支持按目录/按书采样，
+  得给 `parquet:` 的 `hf://` glob 加「按步长/随机挑分片」的能力（如 `--shard_stride N` 或 spec 后缀
+  `@stride=N`）。
 - **LCCC base 与 large 有重叠**：实测在 large 的一个分片里检索 base 采样，直接命中 6.7%；按分片占比
   （2.8M/12M）折算，两者真实重叠约 **30%**。base 本来就是 large 的清洗子集，所以同时用两个来源会让
   ~7% 的 chat 桶 token 是重复对话（一遍的桶里再叠一层）。要在意就去重，或只用 large。
 - **视觉输入**：固定 224×224 单图（等比填充成正方形）；不支持原生动态分辨率、多图交错与视频。
-- **视觉对齐**：ViT 从零训练（14.4M），未含对比学习/蒸馏预训练这一步，识别能力有限；纯文本部署可整个跳过 align 阶段。开源图文对话集（PhotoChat、聊天截图集，见 `doc/datasets.md` §3）把图片存在数据集内部，`--mm_data` 还指不过去，需要先把图导出到 `--image_root` 下。
+- **视觉对齐**：ViT 从零训练（14.4M），未含对比学习/蒸馏预训练这一步，识别能力有限；纯文本部署可整个跳过 align 阶段。开源的对话内图文集把图片存在数据集内部，`--mm_data` 还指不过去，需要先把图导出到 `--image_root` 下。
 - **预训练细节**：按文档拼接打包，没有跨文档掩码；会话边界依赖 `<|endoftext|>` 与打包策略。
 - **Auto 类**：模型类未自动注册；如需 `AutoModel`，调用 `hvlm.register()`。

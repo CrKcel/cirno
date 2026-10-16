@@ -1,13 +1,13 @@
 # 训练数据集
 
-候选语料清单。预训练按**桶**组织——每个桶一个 `prepare_data --out`，训练时按权重混合；对话 / 角色扮演
-SFT 与视觉对齐另列。取数语法见 [common_io.py](../scripts/common_io.py) 的模块 docstring：
+预训练按**桶**组织——每个桶一个 `prepare_data --out`，训练时按权重混合；对话 / 角色扮演 SFT 另列。
+取数语法见 [common_io.py](../scripts/common_io.py) 的模块 docstring：
 `hf:<数据集>:<字段>[:<config>[:<split>]]`，字段 `-` 表示整条记录、`a.b` 走嵌套路径、`a+b` 顺序拼接，
 列表型字段自动用换行拼成一篇文档，末尾 `@N` 限制文档数。
 
 ## 0. 取数约定
 
-> 1. `datasets` ≥ 4 已移除加载脚本支持，凡是只带 `*.py` 加载脚本的数据集（LCCC、MNBVC、DailyDialog、
+> 1. `datasets` ≥ 4 已移除加载脚本支持，凡是只带 `*.py` 加载脚本的数据集（LCCC、DailyDialog、
 >    EmpatheticDialogues）用 `hf:` 直连都会报 `Dataset scripts are no longer supported`。改走 Hub 自动转换的
 >    parquet 分支：`parquet:hf://datasets/<repo>@refs/convert/parquet/<config>/<split>/*.parquet:<field>`。
 >    路径里的 `@refs/...` 是 revision，**不是** `@N` 文档上限。凡是"只有加载脚本"的集，下面一律只给
@@ -18,54 +18,53 @@ SFT 与视觉对齐另列。取数语法见 [common_io.py](../scripts/common_io.
 >    ≈ 0.70），误差 ±20%，真实值以 `prepare_data` 的 `train_tokens` 为准。压缩语料先抽样标定「字符/压缩
 >    字节」再外推。
 > 4. **`txt:` 是一个文件一篇文档**，且只吃 UTF-8 纯文本：`.txt.gz` 必须先解压；一个作品几千行会被算成
->    一篇并超过 `--max_doc_chars`（默认 200000）而被整篇丢掉，要按行/场景切分后再落盘。
+>    一篇，`--max_doc_chars`（默认 200000）只保留前 20 万字符，要按行/场景切分后再落盘。
 
 ## 1. 预训练（按桶）
 
 桶由 [run_pipeline.sh](../scripts/run_pipeline.sh) 的 DATA 段定义。各桶训练配额不是手写的，而是从各桶
 `meta.json` 的 `train_tokens` 反算：`该桶的三段课程权重 × 对应阶段 token 之和 ÷ 该桶 train_tokens`
-（各段 token 见 [training.md §2](training.md)；`tools/plan_mix.py` 直接把三段 `--data` 串算出来）。当前配比
-让每个桶恰好走一遍（wiki 取 90%），所以这个比值应当 ≈1：明显低于 1 说明有语料没被训练（先看
+（各段 token 见 [training.md §2](training.md)；`tools/plan_mix.py` 直接把三段 `--data` 串算出来）。当前预算是
+各桶池子之和，每个桶恰好走一遍，所以这个比值应当是 1：明显低于 1 说明有语料没被训练（先看
 `prepare_data` 的 `--max_tokens` 有没有卡在池子下面），高于 1 就是在背语料。
 
 八个桶的现状：
 
 - **`chat`** — 中文人类对话 / 口语
-  - 阶段权重 A / B / C：— / 26.5% / 34%
-  - 全程 token 880M；池子 880M → **1.01B**（计入 b-corpus）；遍数 1.00 → 待重算
-  - 来源（进配方 / 候选）：LCCC base+large、字幕、b-corpus `v-corpus-zh` / 多情绪对话
+  - 阶段权重 A / B / C：— / 20.8% / 34%
+  - 全程 token 1.010B；池子 1.010B；遍数 1.00
+  - 来源：LCCC base+large、字幕、b-corpus `v-corpus-zh`
 - **`en_chat`** — 英文对话
-  - 阶段权重 A / B / C：— / 7.8% / 3.6%
-  - 全程 token 208M；池子 208M → **810M**；遍数 1.00 → 待重算
-  - 来源：soda、真人小集、b-corpus `v-corpus-en`+`emoji`、`TinyStoriesV2` / —
+  - 阶段权重 A / B / C：— / 24.9% / 3.6%
+  - 全程 token 810M；池子 810M；遍数 1.00
+  - 来源：soda、真人小集、b-corpus `v-corpus-en`+`emoji`、`TinyStoriesV2`
 - **`fiction`** — 小说 / 网文 / 剧本对白
-  - 阶段权重 A / B / C：45% / 23.8% / 28%
-  - 全程 token 1.176B；池子 1.176B → **1.34B**；遍数 1.00 → 待重算
-  - 来源：webnovel-chinese、b-corpus `互动小说`/`近现代小说`/`翻译名著`/`轻小说` / ChineseNovels
+  - 阶段权重 A / B / C：45% / 24.1% / 28%
+  - 全程 token 1.593B；池子 1.593B；遍数 1.00
+  - 来源：webnovel-chinese、b-corpus `互动小说`/`近现代小说`/`翻译名著`/`轻小说`、ChineseNovels
 - **`long`** — 长文 / 非对话文本
-  - 阶段权重 A / B / C：35% / 6.9% / 4%
-  - 全程 token 506M；池子 506M → **527M**；遍数 1.00 → 待重算
-  - 来源：Zhihu-KOL、b-corpus `提高逼格`/`畅销书`/`散文集`/`古籍` / Fineweb-Edu、fineweb-2、wikisource
+  - 阶段权重 A / B / C：35% / 1.9% / 4%
+  - 全程 token 527M；池子 527M；遍数 1.00
+  - 来源：Zhihu-KOL、b-corpus `提高逼格`/`畅销书`/`散文集`/`古籍`
 - **`wiki`** — 通识 / 百科 / 常识
-  - 阶段权重 A / B / C：20% / 35.1% / 28.4%
-  - 全程 token 1.215B；池子 1.343B；遍数 0.90
-  - 来源：baidu-baike / 萌娘百科、wikipedia、MNBVC
+  - 阶段权重 A / B / C：20% / 28.3% / 28.4%
+  - 全程 token 1.425B；池子 1.425B；遍数 1.00
+  - 来源：baidu-baike、萌娘百科
 - **`roleplay`** — 人设卡 / 单轮扮演
-  - 阶段权重 A / B / C：— / — / 1.47%
-  - 全程 token 11.7M；池子 11.7M → **13.9M**；遍数 1.00 → 待重算
-  - 来源：shibing624、Johnson8187、b-corpus `q-corpus` / LooksJuicy
+  - 阶段权重 A / B / C：— / — / 1.6%
+  - 全程 token 17.2M；池子 17.2M；遍数 1.00
+  - 来源：shibing624、Johnson8187、b-corpus `q-corpus`、LooksJuicy
 - **`roleplay_char`** — 小说 / 影视角色的问答
-  - 阶段权重 A / B / C：— / — / 0.44%
-  - 全程 token 3.5M；池子 3.5M → **5.1M**；遍数 1.00 → 待重算
-  - 来源：ChatHaruhi 54K、b-corpus `ChatHaruhi` / ChatHaruhi 118K
+  - 阶段权重 A / B / C：— / — / 0.47%
+  - 全程 token 5.1M；池子 5.1M；遍数 1.00
+  - 来源：ChatHaruhi 54K、b-corpus `ChatHaruhi`
 - **`roleplay_catgirl`** — 猫娘人设
-  - 阶段权重 A / B / C：— / — / 0.02%
+  - 阶段权重 A / B / C：— / — / 0.01%
   - 全程 token 0.15M；池子 0.15M；遍数 1.00
-  - 来源：kxdw2580 v2 / nana-catgirl-wildchat-534K
+  - 来源：kxdw2580 v2
 
-合计：**预算 4.0B，入桶前的池子 ≈4.13B**，实际消耗 4.0B、重复 0；唯一没读完的是百度百科按"常见词 →
-冷门实体"排序后的 10% 长尾。roleplay 三个桶合计 15.4M token，任何一桶超过 2 遍就是在背语料而不是
-学风格。
+合计：**预算 5.39B = 各桶池子之和**，实际消耗 5.39B、重复 0，没有哪个桶被 `--max_tokens` 截断；chat
+（1.010B）仍是最紧的一环。roleplay 三个桶合计 22.5M token，任何一桶超过 2 遍就是在背语料而不是学风格。
 
 **`Limour/b-corpus` 全量入桶**：这份合辑（1,819 个文件 / 552.6 MB）按内容拆到六个桶——`v-corpus-zh` → chat，
 `v-corpus-en`、`emoji/kajiwoto` → en_chat，`互动小说`、`近现代小说`、`翻译名著`、`轻小说` → fiction，
@@ -74,9 +73,14 @@ SFT 与视觉对齐另列。取数语法见 [common_io.py](../scripts/common_io.
 roleplay +2.2M、roleplay_char +1.6M）。
 
 **英文桶另加 `noanabeshima/TinyStoriesV2`**（2.7M 篇 GPT-4 儿童故事，≈550M token，见 §1.2），两份合计把
-池子推到 **≈5.05B**，已经超过 4.0B 预算——所以上面列出的"全程 token"、池子与遍数，以及
-[training.md §2](training.md) 的三段权重，都是入桶前的实测值，`--max_tokens` 同理：数据落盘、跑完
-`prepare_data` 之后要用 `tools/plan_mix.py` 按新的 `train_tokens` 重算，届时每个桶都读不满一遍。
+池子推到 ≈5.05B。
+
+**另有三份进桶**：`Miaowuawa/ChineseNovels` → fiction（截断后 ≈254M token）、
+`mrzjy/chinese_moegirl_wiki_corpus_raw` → wiki（原始 wikitext，清洗后抽样外推 ≈82M token）、
+`LooksJuicy/Chinese-Roleplay-SingleTurn` → roleplay（≈3.3M token）。池子合计 **≈5.39B**，预训练预算就取
+这个总量（1.21B / 3.10B / 1.08B 三段），所以每个桶各读一遍、`passes` 全是 1.00x。ChineseNovels 与萌娘
+百科是抽样外推（±20%）：落盘后按 `prepare_data` 的实测 `train_tokens` 重跑 `tools/plan_mix.py`，把预算与
+各桶 `--max_tokens` 一起挪到新的池子之和。
 
 每节列该桶的来源与已知噪声，【流行文化】标记的是补"网感"（ACG 梗、视觉小说台词、作品角色扮演）的那几份。
 
@@ -96,11 +100,6 @@ roleplay +2.2M、roleplay_char +1.6M）。
     必须先清洗。全量 11.43B 原始字符只剩 2.93B 对白，而 `prepare_data` 的 `--max_doc_chars 200000` 之后
     **真正能进桶的只有 0.61B 字符 ≈ 0.43B token**：1,470 篇超过 200k 字符（最大 67 MB），里面是卡拉OK
     逐字行（`佐\n佐\n佐…`），这批文档是待清理的噪声
-- **[Johnson8187/Chinese_Multi-Emotion_Dialogue_Dataset](https://hf.co/datasets/Johnson8187/Chinese_Multi-Emotion_Dialogue_Dataset)**
-  — 人类对话；4.2k 段对话 / 161 KB
-  - 取法：`hf:Johnson8187/Chinese_Multi-Emotion_Dialogue_Dataset:text:default:train`
-  - 日常对话 + 影视对白 + AI 生成混合，自带情绪标签；量小，当风格补充。`text` 字段**一行一句**，不是
-    整段会话
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `v-corpus-zh/**`** — 人类对话【流行文化】；
   820 个 `.txt.gz` / 187.6 MB 压缩，抽样 0.96 字符/压缩字节 → ≈180M 字符 ≈ **130M token 量级**
   - 取法：`hf download` → 解压 → 按行/按场景落 jsonl → 作为该桶的额外 `--source`
@@ -109,13 +108,9 @@ roleplay +2.2M、roleplay_char +1.6M）。
     中位 21 字，是二次元口语与角色语气最浓的一档，也是 chat 桶（最紧的一环）目前最大的新增量。
     ⚠️ cc-by-nc-sa-4.0 + `not-for-all-audiences`，来源含 R18 作品；仓库里混着 130 多个 `.py`/`.bat`
     提取脚本，glob 要写成 `*.txt.gz`；`txt:` 一个文件一篇文档，必须先拆行
-- **liwu/MNBVC `forum`/`blog`** — 人类对话；`forum` 等 18 个子集
-  - 取法：仅加载脚本，无 parquet 分支
-  - 论坛对白/博客，是扩该桶最对口的结构化来源。要么把 `datasets` 降到 3.x，要么自己落成本地
-    parquet/jsonl 再 `jsonl:`/`parquet:`
 
 同仓的 `v-corpus-en`（135 个 `.txt.gz` / 69.3 MB）是英文视觉小说对白，归 §1.2。该桶的池子 = LCCC
-base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再要扩只能从 MNBVC 与修好卡拉OK
+base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再要扩只能从修好卡拉OK
 问题后的字幕余量上想办法。
 
 ### 1.2 en_chat — 英文对话
@@ -177,9 +172,7 @@ base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再�
     必须按行拆；`user：`/`gpt：` 前缀要在清洗时去掉
 
 除 SODA 外，英文桶里**真人写的小集各自带格式噪声**（标点前空格、`_comma_`、`<s>[agent_1]` 标记、角色名
-前缀、整条 JSON 字符串），进桶前都要过一遍；`bavard/personachat_truecased`（131k 条，人写，
-`personality`+`history`+`candidates`）只用于 SFT，喂预训练会因候选重复而大量重复，⚠️ 只有加载脚本，
-且别用 `AlekseyKorshuk/persona-chat` 之类的旧镜像（实测是小写且标点前带空格的脏版本）。
+前缀、整条 JSON 字符串），进桶前都要过一遍。
 
 该桶的池子：soda 191M + 真人小集 17M = 208M → b-corpus `v-corpus-en`/`emoji` +52M →
 `TinyStoriesV2` +550M ≈ **810M**，其中三分之二是合成语料（SODA 蒸馏自 InstructGPT、TinyStoriesV2 出自
@@ -198,10 +191,12 @@ GPT-4）。
   - 取法：`hf:wdndev/webnovel-chinese:text:default:train`
   - 该桶主力（原本是池子的全部）。字段干净（`title`/`chapter`/`text`），parquet 分支就是小说的全量池，
     一遍读完；apache-2.0
-- **[Miaowuawa/ChineseNovels](https://hf.co/datasets/Miaowuawa/ChineseNovels)** — 网文（候选）；2.3k 本 /
-  623 MB
+- **[Miaowuawa/ChineseNovels](https://hf.co/datasets/Miaowuawa/ChineseNovels)** — 网文；2,292 本 / 623 MB
+  parquet，抽样 300 本中位 22.3 万字符（Han 0.80）→ 全量 ≈755M 字符 ≈ **529M token**；`--max_doc_chars`
+  默认 200000 会按篇截断，**56% 的书被砍**，截断后 ≈363M 字符 ≈ **254M token**
   - 取法：`hf:Miaowuawa/ChineseNovels:-:default:train`
-  - 同人/耽美占比高，单列结构（viewer 打不开，用 `-` 取整条记录），作为题材多样性候选
+  - 同人/耽美占比高，单列结构（viewer 打不开，用 `-` 取整条记录）。⚠️ **一整本一篇文档**，进桶前应拆章，
+    否则每本只进前 200k 字符；token 数是抽样外推，真实值以 `prepare_data` 的 `train_tokens` 为准
 - **[mrzjy/Chinese_interactive_novels_3k](https://hf.co/datasets/mrzjy/Chinese_interactive_novels_3k)** —
   互动小说【流行文化】；3,534 部 / parquet 362.6 MB，抽样 30 部均 60.3k 字符（中位 31.3k，长尾）→
   ≈213M 字符 ≈ **149M token**
@@ -226,7 +221,8 @@ GPT-4）。
 
 该桶原本的 1.176B token 是 `wdndev/webnovel-chinese` parquet 分支的全量（网文，一遍读完）；b-corpus 再补
 `互动小说`（≈149M，同人、未清洗）与 `近现代小说`/`翻译名著`/`轻小说`（≈14M，出版作品、授权链不清），
-池子 ≈1.34B。真公版书（`wikimedia/wikisource`、b-corpus `古籍`）偏文言文，是风格污染，不进该桶。
+池子 ≈1.34B；`Miaowuawa/ChineseNovels` 再补 ≈254M token（整本一篇，不拆章就只进每本前 200k 字符），
+池子 ≈1.59B。真公版书（b-corpus `古籍`）偏文言文，是风格污染，不进该桶。
 
 ### 1.4 long — 长文 / 非对话文本
 
@@ -235,21 +231,6 @@ GPT-4）。
   - 取法：`hf:wangrui6/Zhihu-KOL:RESPONSE:default:train`
   - 真人类写的**长回答**（实测 600–6700 字），不属于 IM 闲聊，放进该桶补篇章连贯性；原本是该桶唯一的源，
     一遍读完；无 license 声明
-- **[opencsg/Fineweb-Edu-Chinese-V2.1](https://hf.co/datasets/opencsg/Fineweb-Edu-Chinese-V2.1)** — 长文；
-  `4_5` 档 70 GB / ~46B token，`3_4` 档 800 GB
-  - 取法：`parquet:hf://datasets/opencsg/Fineweb-Edu-Chinese-V2.1@main/4_5/*.parquet:text`
-  - 教育打分过滤过的中文网页正文，apache-2.0，原本是长文桶的**多样性来源**。⚠️ 不进当前配方：长文桶就是
-    知乎的全部（0.51B token），再往下读只会拿到 `4_5` 档的头几片，而它按来源语料分组、头几片是清一色
-    `CCI3`（[training.md §5](training.md)）。`4_5` 是分数档目录、不是 config，所以必须走 `parquet:hf://`；
-    字段 `text`/`score`/`source`。`hf:` 直连只能拿 `default`（三档混在一起）
-- **[HuggingFaceFW/fineweb-2](https://hf.co/datasets/HuggingFaceFW/fineweb-2)** — 长文；`cmn_Hani` 档
-  - 取法：`hf:HuggingFaceFW/fineweb-2:text:cmn_Hani:train`
-  - 通用中文网页正文，去重过、量大，作为该桶的兜底；不如 Fineweb-Edu 干净
-- **[wikimedia/wikisource](https://hf.co/datasets/wikimedia/wikisource) `20231201.zh`** — 长文（**慎用**）；
-  265.7k 篇 / 3.3 GB，平均 4573 字
-  - 取法：`parquet:hf://datasets/wikimedia/wikisource@refs/convert/parquet/20231201.zh/train/*.parquet:text`
-  - 公版书/文献（cc-by-sa-3.0）。⚠️ **实测 68% 偏文言文**，对 IM 聊天模型是风格污染——古汉语词汇/语法会
-    渗进生成。默认不用
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `提高逼格/history_24/**`** — 白话史书
   【流行文化】；38 个 `.txt.gz` / 26.9 MB，抽样 0.75 字符/压缩字节 → ≈20.1M 字符 ≈ **14.1M token**
   - 取法：解压 → 按章落 jsonl → 作为该桶的额外 `--source`
@@ -266,8 +247,7 @@ GPT-4）。
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `古籍/**`** — 古籍（**慎用**）【流行文化】；
   16 个 `.txt.gz` / 11.4 MB，抽样 0.75 字符/压缩字节 → ≈8.5M 字符 ≈ **6.0M token**
   - 取法：同上
-  - 《史记》《古文观止》《人间词话》原文，和 `wikimedia/wikisource` 是同一个问题：文言与古汉语语法会渗进
-    生成，要用先筛白话子集
+  - 《史记》《古文观止》《人间词话》原文，文言与古汉语语法会渗进生成，要用先筛白话子集
 
 ### 1.5 wiki — 通识 / 百科 / 常识
 
@@ -275,8 +255,8 @@ GPT-4）。
   parquet 分支 1.7M 条 / 3.2 GB（原 json 5.63M 条 / 16.8 GB）
   - 取法：`parquet:hf://datasets/lars1234/baidu-baike-dataset@refs/convert/parquet/default/partial-train/*.parquet:-`
   - 该桶主力。**简体、现代白话**的百科条目，实测信息密度很高：**中位条目仅 130 字**（`title+summary`
-    中位 78 字），比中文维基（中位 3624 字）更贴近"一句话说清一个事实"的形态；parquet 分支实测 1.73M 条 /
-    1.92B 字符 ≈ **1.34B token**，配比取它的 90%（顺序截断正好落在常见实体上，砍掉的是冷门实体长尾）。
+    中位 78 字），比论述型长条目更贴近"一句话说清一个事实"的形态；parquet 分支实测 1.73M 条 /
+    1.92B 字符 ≈ **1.34B token**，按池子全量读一遍（它按"常见词 → 冷门实体"排序，尾部是冷门实体）。
     字段 `title`/`summary`/`sections`/`tags`/`url`，`-` 取整条（自动拼 sections），要高事实密度用
     `title+summary`。⚠️ 语料卡未声明 license，爬取年份约 2019；**优先走 parquet 分支**（3.2 GB），`hf:`
     直连会拉原始的 16.8 GB 单文件 json
@@ -284,23 +264,16 @@ GPT-4）。
   通识【流行文化】；131.5k 条 / 2 个 parquet 分片共 301 MB，合计 ≈291M 字符 ≈ **2 亿 token 量级
   （清洗前）**
   - 取法：`hf:mrzjy/chinese_moegirl_wiki_corpus_raw:text:default:train`（或
-    `parquet:hf://datasets/mrzjy/chinese_moegirl_wiki_corpus_raw@refs/convert/parquet/default/train/*.parquet:text`）
+    `parquet:hf://datasets/mrzjy/chinese_moegirl_wiki_corpus_raw@refs/convert/parquet/default/train/*.parquet:text`）；
+    原始 wikitext 不能直接进桶，剥完模板/表格/注释后落成 `jsonl:data/wiki/*.jsonl`
   - 萌娘百科 20230814 dump，ACG 梗与术语的密度是这批里最高的，给"网感"补事实性内容；语料卡标
     cc-by-4.0，但内容是站点 dump，对外发布前按萌娘百科自身的著作权信息再核对一次。⚠️ 是**原始
     wikitext**：较小的分片（9,765 条 / 26.0M 字符）实测 99.6% 的条目含 `[[`、91.5% 含 `{{`、9.0% 含
     `<!--`、88% 含 `'''`，另有 14.2% 带表格语法，Han 比例只有 0.34，中位 1736 字符、最长 233k 字符。进桶
-    前必须剥模板/表格/注释、保留正文与 `'''强调'''`，并按 `--max_doc_chars` 截断——默认 200000 会把超长页
-    整篇丢掉。清洗后 Han 比例会显著回升，token 数要重测，不能直接按 291M 字符配比
-- **[wikimedia/wikipedia](https://hf.co/datasets/wikimedia/wikipedia)** — 通识；zh 1.4M 篇 / 1.7 GB
-  （实测 1.05B 字符 ≈ 0.74B token）
-  - 取法：`hf:wikimedia/wikipedia:text:20231101.zh:train`
-  - 通识候选，字段 `text`，实测单篇近万字。⚠️ **繁简混用**（抽查 400 篇里 366 篇），进桶前需 opencc 统一
-    成简体；事实密度不如百度百科，当前不进配方
-- **liwu/MNBVC `wiki`/`news`/`qa`** — 通识；见仓库 README
-  - 取法：同 §1.1（无 parquet 分支）
-  - 和 `forum`/`blog` 同一仓库不同 config，处理方式同上
+    前必须剥模板/表格/注释、保留正文与 `'''强调'''`，并按 `--max_doc_chars` 截断——超过默认 200000 的长页
+    只进前 200k 字符。清洗后 Han 比例会显著回升，token 数要重测，不能直接按 291M 字符配比
 
-该桶是唯一池子大于配额的桶。"通识内容会不会太少"的答案不在数据侧：116.65M 参数能存下的事实本来就有限，
+**"通识内容会不会太少"的答案不在数据侧**：116.65M 参数能存下的事实本来就有限，
 超过容量后不同事实还会互相干扰；要动手先补知识评测，而不是继续加百科（[training.md §2](training.md)）。
 
 ### 1.6 roleplay — 人设卡 / 多轮扮演
@@ -315,7 +288,7 @@ GPT-4）。
   - `instruction`/`input`/`output`/`system`，人设齐全。AI 生成，同样要过滤
 - **[LooksJuicy/Chinese-Roleplay-SingleTurn](https://hf.co/datasets/LooksJuicy/Chinese-Roleplay-SingleTurn)**
   — 角色扮演【流行文化】；7,593 条 / **4.66M 字符 ≈ 3.3M token**
-  - 取法：`hf:LooksJuicy/Chinese-Roleplay-SingleTurn:-:default:train` → 落本地 jsonl
+  - 取法：`hf:LooksJuicy/Chinese-Roleplay-SingleTurn:-:default:train`
   - 作品角色的官方设定 + 单轮扮演回复，是这批里最贴"角色扮演"定位的一份；apache-2.0。实测 `instruction`
     （人设）中位 **514** 字、`input`（用户）中位 8 字、`output`（角色回复，带 `（动作描写）`）中位 100 字、
     p90 156 字，Han 比例 0.87。⚠️ `instruction` **不在** `normalize_messages` 的 `_PERSONA` 里（只认
@@ -346,11 +319,6 @@ GPT-4）。
     `system：I want you to act like …`，其后每行 `角色：「台词」` 或 `旁白：…`。⚠️ 与
     `silk-road/ChatHaruhi-54K` 同源；同一目录里英文侧（Harry Potter、Sheldon）与中文侧（金庸、原神）混放，
     要按 Han 比例分语言后再进桶；首行 system 与行尾残留的 `\` 要在清洗时去掉
-- **[silk-road/ChatHaruhi-Expand-118K](https://hf.co/datasets/silk-road/ChatHaruhi-Expand-118K)** —
-  角色扮演；118.1k 条，parquet 分支只有 `context`+`target`
-  - 取法：`parquet:hf://datasets/silk-road/ChatHaruhi-Expand-118K@refs/convert/parquet/default/train/*.parquet:context+target`
-  - 上面那份的超集，但 `context` 是**英文**人设指令（`I want you to act like …`）+ 原文场景，约 3 KB/条，
-    只有 `target` 是那一句对白。只要对白就用 54K 那份
 
 ### 1.8 roleplay_catgirl — 猫娘人设
 
@@ -366,28 +334,6 @@ GPT-4）。
     身份"）、`v2/common-v2-extra`（问答基本不相关，1.83 MB 看着最大）、`v2-qwen3` 整个系列（common 子集
     自 06/06 起被标注避免使用，且所有问题都触发长思维链）。`history` 会被 `normalize_messages` 忽略，
     多轮的 `create-next` 因此塌成单轮
-- **[cyberlangke/nana-catgirl-wildchat-534K](https://hf.co/datasets/cyberlangke/nana-catgirl-wildchat-534K)**
-  — 猫娘（**待清洗**）；534.7k 条 / 785 MB，75 语
-  - 取法：`parquet:hf://datasets/cyberlangke/nana-catgirl-wildchat-534K@refs/convert/parquet/default/train/*.parquet:query+reply`
-  - 真实用户 query（WildChat 抽取）+ DeepSeek 猫娘回复。**思维链在独立的 `thinking` 列**，只取
-    `query+reply` 时 parquet 只读这两列，思维链自动不进语料。⚠️ 两个 blocker：`language` 列不可信（中文
-    query 被标成 Afrikaans，抽样 1000 行里 Han 主导的回复只占 **29.3%**），而 `prepare_data` 没有语言过滤，
-    直接指过去会把七成非中文文本灌进该桶；回复中位 237 字、37.5% 带 markdown/加粗。要用得先写清洗脚本筛
-    Han 比例并压长度
-
-### 1.9 未进配方的候选
-
-`Limour/b-corpus` 没有子目录留在这里：正文类目录已全部归入 §1.1–§1.8，剩下的 `00-preview/`
-（`statistic.xlsx` 与预览文本）和各作品目录里的 `*.py`/`*.bat` 提取脚本不是语料。
-
-- **liwu/MNBVC `code`/`math`** — 跳过。130M 上代码/数学买不到推理泛化，只会稀释对话分布并把风格往助理腔拉
-- **[opencsg/Fineweb-Edu-Chinese-V2.1](https://hf.co/datasets/opencsg/Fineweb-Edu-Chinese-V2.1) `4_5`**
-  （~46B token，可归属 long）— 分片按来源语料分组，取头部就是清一色 `CCI3`，且长文池已被知乎填满
-  （见 §1.4）
-- **[wikimedia/wikipedia](https://hf.co/datasets/wikimedia/wikipedia)**（0.74B token，可归属 wiki）— 繁简
-  混用，且事实密度不如百度百科（见 §1.5）
-- **[wikimedia/wikisource](https://hf.co/datasets/wikimedia/wikisource)**（3.3 GB，可归属 long）— 68% 偏
-  文言文（见 §1.4）
 
 ## 2. 对话 / 角色扮演 SFT
 
@@ -406,48 +352,14 @@ GPT-4）。
   - 同上，`instruction`/`input`/`output`/`system` 形状
 - **[LooksJuicy/Chinese-Roleplay-SingleTurn](https://hf.co/datasets/LooksJuicy/Chinese-Roleplay-SingleTurn)**
   — 人设单轮【流行文化】
-  - 取法：落盘时把 `instruction` 改名 `system_prompt` 再 `--mm_data`
+  - 取法：落盘时把 `instruction` 改名 `system_prompt` 再写 jsonl 给 `--mm_data`
   - 作品角色的官方人设 + 扮演回复，直接可用（别名表实测通过：`output`→`self`、`input`→附带在 user 轮）。
     改名后人设进 `system` 且不计损失；不改名则整段人设拼进 user 轮并在每轮重复（见 §1.6）
-- **[facebook/empathetic_dialogues](https://hf.co/datasets/facebook/empathetic_dialogues)** — 情绪陪伴
-  - 取法：`--mm_data "parquet:hf://datasets/facebook/empathetic_dialogues@refs/convert/parquet/default/train/*.parquet:-"`
-  - 英文，人写。对应情绪陪伴这条用途；只学 `utterance` 那一侧。只有加载脚本，`hf:` 直连已失效
-- **[li2017dailydialog/daily_dialog](https://hf.co/datasets/li2017dailydialog/daily_dialog)** — 日常口语
-  - 取法：`--mm_data "parquet:hf://datasets/li2017dailydialog/daily_dialog@refs/convert/parquet/default/train/*.parquet:dialog"`
-  - 英文日常对话，按 `dialog` 列表交替映射。同样只有加载脚本
-- **[bavard/personachat_truecased](https://hf.co/datasets/bavard/personachat_truecased)** — 人设闲聊
-  - 取法：`--mm_data "parquet:hf://datasets/bavard/personachat_truecased@refs/convert/parquet/full/train/*.parquet:-"`
-  - `personality` + `history` + `candidates`（末条是真实回复），只用于 SFT（喂预训练会因候选重复而大量重复）
-- **[lorinma/Slim-LCCC-zh](https://hf.co/datasets/lorinma/Slim-LCCC-zh)** — 闲聊风味种子
-  - 取法：`--mm_data "hf:lorinma/Slim-LCCC-zh:-:default:train"`
-  - LCCC-large 里挑出的 1 万条 casual 闲聊，转成 ShareGPT 格式，专门用来对比"AI 腔"。⚠️ **gated**：需先
-    `hf auth login` 并接受条款，否则报 `DatasetNotFoundError`
-- **[Gryphe/Sonnet3.5-Charcard-Roleplay](https://hf.co/datasets/Gryphe/Sonnet3.5-Charcard-Roleplay)** —
-  角色卡扮演
-  - 取法：`--mm_data "hf:Gryphe/Sonnet3.5-Charcard-Roleplay:-:default:train"`
-  - 英文、AI 生成，助理腔过滤要更狠
-- **[lemonilia/Roleplay-Forums_2023-04](https://hf.co/datasets/lemonilia/Roleplay-Forums_2023-04)** —
-  真实论坛扮演
-  - 取法：`--mm_data "hf:lemonilia/Roleplay-Forums_2023-04:-:default:train"`
-  - 真实人写，但作者注明 HTML 标签间的空格在转换时损坏，需要自己修文本
 
 SFT 的多个来源是**按行数拼接**的（`ChatDataset` 把 `--mm_data` 的各项顺序连成一个 offsets 列表），没有
 权重参数：`human_dialog.jsonl, persona.jsonl, refuse.jsonl` 谁的行数多谁就主导。
 
-## 3. 视觉对齐
-
-- **[passing2961/photochat_plus](https://hf.co/datasets/passing2961/photochat_plus)** — 真实人—人分享照片
-  聊天；贴合"图在对话中的语气"，图片存在数据集里，见下方说明
-- **[friedrichor/PhotoChat_image](https://hf.co/datasets/friedrichor/PhotoChat_image)** — PhotoChat 图片侧；
-  ⚠️ 同上
-- **[Mobiusi/Chat-Record-Image-Dataset](https://hf.co/datasets/Mobiusi/Chat-Record-Image-Dataset)** —
-  手机聊天截图 + OCR 文本；⚠️ 对应"聊天截图"场景
-
-**阻塞**：这些集的图片以 PIL/bytes 存在数据集内部，而 `--mm_data` 目前只认 `--image_root` 下的相对路径，
-所以它们还不能像预训练集那样一条命令指过去。这一步（落盘时把图一并导出到缓存目录、再设 `--image_root`）
-还没做；需要时先在本地把图导成 `data/mm/images/...` 再写 jsonl。
-
-## 4. 使用前自检
+## 3. 使用前自检
 
 正式 tokenize 之前先用 `@N` 抽一小批看看文本长什么样、字段有没有取错：
 
@@ -469,7 +381,7 @@ python - <<'PY'
 import sys; sys.path.insert(0, "scripts")
 from common_io import iter_records
 from hvlm.data_core import normalize_messages
-spec = "hf:LooksJuicy/Chinese-Roleplay-SingleTurn:-:default:train"
+spec = "hf:Johnson8187/role-play-chinese:-:default:train"
 print(normalize_messages(next(iter_records(spec, max_docs=1))))
 PY
 ```
@@ -477,16 +389,15 @@ PY
 规模与分片不看文件头，直接问 datasets-server：
 
 ```bash
-curl -s "https://datasets-server.huggingface.co/size?dataset=mrzjy%2Fchinese_moegirl_wiki_corpus_raw"
+curl -s "https://datasets-server.huggingface.co/size?dataset=mrzjy%2FChinese_interactive_novels_3k"
 ```
 
-清洗后按正常流程进桶（`v-corpus-zh` 拆行落成的 jsonl 作为 chat 桶的额外来源）。加源会把 chat 池子抬到
-880M 以上，`--max_tokens` 要跟着放到新池子之上，`train_tokens` 变了以后三段权重再用 `tools/plan_mix.py`
-重算：
+清洗落盘后按正常流程进桶（`v-corpus-zh`、字幕清洗产物都是 `data/chat/` 下的 jsonl）。`--max_tokens` 要放在
+该桶池子之上，`train_tokens` 变了以后三段权重再用 `tools/plan_mix.py` 重算：
 
 ```bash
 python scripts/prepare_data.py --tokenizer tokenizer --desegment \
-  --source "jsonl:data/chat/*.jsonl:text" --source "jsonl:data/acg/*.jsonl:text" \
+  --source "jsonl:data/chat/*.jsonl:text" \
   --out data/bin/chat --max_tokens 1100000000 --val_tokens 4000000
 ```
 
