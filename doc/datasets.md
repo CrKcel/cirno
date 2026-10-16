@@ -1,6 +1,6 @@
 # 训练数据集
 
-预训练按**桶**组织——每个桶一个 `prepare_data --out`，训练时按权重混合；对话 / 角色扮演 SFT 另列。
+预训练按桶组织——每个桶一个 `prepare_data --out`，训练时按权重混合；对话 / 角色扮演 SFT 另列。
 取数语法见 [common_io.py](../scripts/common_io.py) 的模块 docstring：
 `hf:<数据集>:<字段>[:<config>[:<split>]]`，字段 `-` 表示整条记录、`a.b` 走嵌套路径、`a+b` 顺序拼接，
 列表型字段自动用换行拼成一篇文档，末尾 `@N` 限制文档数。
@@ -10,23 +10,22 @@
 > 1. `datasets` ≥ 4 已移除加载脚本支持，凡是只带 `*.py` 加载脚本的数据集（LCCC、DailyDialog、
 >    EmpatheticDialogues）用 `hf:` 直连都会报 `Dataset scripts are no longer supported`。改走 Hub 自动转换的
 >    parquet 分支：`parquet:hf://datasets/<repo>@refs/convert/parquet/<config>/<split>/*.parquet:<field>`。
->    路径里的 `@refs/...` 是 revision，**不是** `@N` 文档上限。凡是"只有加载脚本"的集，下面一律只给
+>    路径里的 `@refs/...` 是 revision，不是 `@N` 文档上限。凡是"只有加载脚本"的集，下面一律只给
 >    parquet 写法。
 > 2. `silver/lccc` 的 `dialog` 字段是**空格分词**的（`你 去 那儿 竟然` 这种），所有吃它的步骤都要带
 >    `--desegment`。
 > 3. **字符 → token**：中文按 0.70 token/字符、英文 0.25 估算（32k BPE，实测口径 1.18B token / 1.68B 字符
 >    ≈ 0.70），误差 ±20%，真实值以 `prepare_data` 的 `train_tokens` 为准。压缩语料先抽样标定「字符/压缩
 >    字节」再外推。
-> 4. **`txt:` 是一个文件一篇文档**，且只吃 UTF-8 纯文本：`.txt.gz` 必须先解压；一个作品几千行会被算成
+> 4. **`txt:` 是一个文件一篇文档**，且只吃 UTF-8 纯文本：`.txt.gz` 先解压；一个作品几千行会被算成
 >    一篇，`--max_doc_chars`（默认 200000）只保留前 20 万字符，要按行/场景切分后再落盘。
 
-## 1. 预训练（按桶）
+## 1. 预训练
 
-桶由 [run_pipeline.sh](../scripts/run_pipeline.sh) 的 DATA 段定义。各桶训练配额不是手写的，而是从各桶
+桶由 [run_pipeline.sh](../scripts/run_pipeline.sh) 的 DATA 段定义。各桶训练配额从各桶
 `meta.json` 的 `train_tokens` 反算：`该桶的三段课程权重 × 对应阶段 token 之和 ÷ 该桶 train_tokens`
 （各段 token 见 [training.md §2](training.md)；`tools/plan_mix.py` 直接把三段 `--data` 串算出来）。当前预算是
-各桶池子之和，每个桶恰好走一遍，所以这个比值应当是 1：明显低于 1 说明有语料没被训练（先看
-`prepare_data` 的 `--max_tokens` 有没有卡在池子下面），高于 1 就是在背语料。
+各桶池子之和，每个桶恰好走一遍，所以这个比值应当是 1：明显低于 1 说明有语料没被训练，高于 1 就是在背语料。
 
 八个桶的现状：
 
@@ -66,24 +65,6 @@
 合计：**预算 5.39B = 各桶池子之和**，实际消耗 5.39B、重复 0，没有哪个桶被 `--max_tokens` 截断；chat
 （1.010B）仍是最紧的一环。roleplay 三个桶合计 22.5M token，任何一桶超过 2 遍就是在背语料而不是学风格。
 
-**`Limour/b-corpus` 全量入桶**：这份合辑（1,819 个文件 / 552.6 MB）按内容拆到六个桶——`v-corpus-zh` → chat，
-`v-corpus-en`、`emoji/kajiwoto` → en_chat，`互动小说`、`近现代小说`、`翻译名著`、`轻小说` → fiction，
-`提高逼格`、`畅销书`、`散文集`、`古籍` → long，`q-corpus` → roleplay，`ChatHaruhi` → roleplay_char。
-按压缩字节抽样外推合计新增 ≈370M token（chat +130M、en_chat +52M、fiction +163M、long +21M、
-roleplay +2.2M、roleplay_char +1.6M）。
-
-**英文桶另加 `noanabeshima/TinyStoriesV2`**（2.7M 篇 GPT-4 儿童故事，≈550M token，见 §1.2），两份合计把
-池子推到 ≈5.05B。
-
-**另有三份进桶**：`Miaowuawa/ChineseNovels` → fiction（截断后 ≈254M token）、
-`mrzjy/chinese_moegirl_wiki_corpus_raw` → wiki（原始 wikitext，清洗后抽样外推 ≈82M token）、
-`LooksJuicy/Chinese-Roleplay-SingleTurn` → roleplay（≈3.3M token）。池子合计 **≈5.39B**，预训练预算就取
-这个总量（1.21B / 3.10B / 1.08B 三段），所以每个桶各读一遍、`passes` 全是 1.00x。ChineseNovels 与萌娘
-百科是抽样外推（±20%）：落盘后按 `prepare_data` 的实测 `train_tokens` 重跑 `tools/plan_mix.py`，把预算与
-各桶 `--max_tokens` 一起挪到新的池子之和。
-
-每节列该桶的来源与已知噪声，【流行文化】标记的是补"网感"（ACG 梗、视觉小说台词、作品角色扮演）的那几份。
-
 ### 1.1 chat — 中文人类对话 / 口语
 
 - **[silver/lccc](https://hf.co/datasets/silver/lccc)** — 人类对话；base 6.8M + large 12M 条 / 1.63 GB
@@ -103,80 +84,71 @@ roleplay +2.2M、roleplay_char +1.6M）。
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `v-corpus-zh/**`** — 人类对话【流行文化】；
   820 个 `.txt.gz` / 187.6 MB 压缩，抽样 0.96 字符/压缩字节 → ≈180M 字符 ≈ **130M token 量级**
   - 取法：`hf download` → 解压 → 按行/按场景落 jsonl → 作为该桶的额外 `--source`
-  - 视觉小说台词，按 `厂商/作品/线路` 组织（`v-corpus-zh/07thExpansion/寒蝉鸣泣之时/…`、
-    `v-corpus-zh/5pb/命运石之门@MCSeekeri/本体/SG01..txt.gz`），行是 `角色名：「台词」` 或纯旁白，中文行
-    中位 21 字，是二次元口语与角色语气最浓的一档，也是 chat 桶（最紧的一环）目前最大的新增量。
-    ⚠️ cc-by-nc-sa-4.0 + `not-for-all-audiences`，来源含 R18 作品；仓库里混着 130 多个 `.py`/`.bat`
-    提取脚本，glob 要写成 `*.txt.gz`；`txt:` 一个文件一篇文档，必须先拆行
+  - 视觉小说台词，按 `厂商/作品/线路` 组织，行是 `角色名：「台词」` 或纯旁白，中文行
+    中位 21 字。仓库里混着 130 多个 `.py`/`.bat` 提取脚本，glob 要写成 `*.txt.gz`；`txt:` 一个文件一篇文档，必须先拆行
 
 同仓的 `v-corpus-en`（135 个 `.txt.gz` / 69.3 MB）是英文视觉小说对白，归 §1.2。该桶的池子 = LCCC
-base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再要扩只能从修好卡拉OK
-问题后的字幕余量上想办法。
+base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再要扩只能从修好卡拉OK问题后的字幕余量上想办法。
 
 ### 1.2 en_chat — 英文对话
 
+- **[noanabeshima/TinyStoriesV2](https://hf.co/datasets/noanabeshima/TinyStoriesV2)** — ⚠️ **合成**；
+  2.7M 篇 / parquet 1.1 GB（validation 27.6K），抽样 1 万篇均 814 字符（中位 726、163 词）→ ≈2.2B 字符
+  ≈ **550M token**
+  - 取法：`hf:noanabeshima/TinyStoriesV2:text:default:train`
+  - GPT-4 生成的短篇故事，ASCII 化、词汇刻意简单（`roneneldan/TinyStories` 的 V2-GPT4 子集），
+    cdla-sharing-1.0，字段只有 `text`、开箱即用。⚠️ 是**叙事不是对话**，放进"英文对话"桶会明显稀释对话
+    分布；它是该桶最大的一份（550M token，约占池子七成），也是**列在最前**的一份：cap 必须高过整个池子
+    （≈810M），否则它后面的 SODA 与真人小集一个 token 都进不来
 - **[allenai/soda](https://hf.co/datasets/allenai/soda)** — ⚠️ **合成**（InstructGPT）；1.2M 会话 /
   ~190M token
   - 取法：`hf:allenai/soda:dialogue:default:train`
   - 该桶主力。语料卡自标 `language_creators:machine-generated`，客服腔/助理腔不明显但确实不是人类语料；
     取 `dialogue` 字段即可（`speakers` 与它对齐，SFT 里能自动判谁是被模仿方），`narrative` 是场景设定、
-    预训练不用。它排在 `TinyStoriesV2` 之后、真人小集之前，所以 cap 必须放在整个池子之上（≈810M），
-    否则排在它后面的小集会被整段丢掉
-- **[noanabeshima/TinyStoriesV2](https://hf.co/datasets/noanabeshima/TinyStoriesV2)** — ⚠️ **合成**（GPT-4）；
-  2.7M 篇 / parquet 1.1 GB（validation 27.6K），抽样 1 万篇均 814 字符（中位 726、163 词）→ ≈2.2B 字符
-  ≈ **550M token**
-  - 取法：`hf:noanabeshima/TinyStoriesV2:text:default:train`
-  - GPT-4 生成的儿童短篇故事，ASCII 化、词汇刻意简单（`roneneldan/TinyStories` 的 V2-GPT4 子集），
-    cdla-sharing-1.0，字段只有 `text`、开箱即用。⚠️ 是**叙事不是对话**，放进"英文对话"桶会明显稀释对话
-    分布；它是该桶最大的一份（550M token，约占池子七成），也是**列在最前**的一份：cap 必须高过整个池子
-    （≈810M），否则它后面的 SODA 与真人小集一个 token 都进不来
-- **[li2017dailydialog/daily_dialog](https://hf.co/datasets/li2017dailydialog/daily_dialog)** — ✅ 人写；
+    预训练不用。
+- **[li2017dailydialog/daily_dialog](https://hf.co/datasets/li2017dailydialog/daily_dialog)** —
   13k 会话
   - 取法：`parquet:hf://datasets/li2017dailydialog/daily_dialog@refs/convert/parquet/default/train/*.parquet:dialog`
   - 日常口语，短句多，英文闲聊里最干净的一档。⚠️ 实测标点被空格隔开（`going for a few beers after
-    dinner ?`），进桶前要去掉标点前空格。只有加载脚本，`hf:` 直连已失效
-- **[ParlAI/blended_skill_talk](https://hf.co/datasets/ParlAI/blended_skill_talk)** — ✅ 众包；4.8k 会话
+    dinner ?`），进桶前要去掉标点前空格。只有加载脚本，`
+- **[ParlAI/blended_skill_talk](https://hf.co/datasets/ParlAI/blended_skill_talk)** — 4.8k 会话
   - 取法：`hf:ParlAI/blended_skill_talk:free_messages:default:train`
-  - 同时含 persona / 共情 / 知识三种模式，和本项目"人设 + 陪伴"的定位最接近；`personas` 是列表，SFT 里
-    能当 system。量很小
-- **[facebook/empathetic_dialogues](https://hf.co/datasets/facebook/empathetic_dialogues)** — ✅ 人写；
-  25k 会话
+  - 同时含 persona / 共情 / 知识三种模式；`personas` 是列表，SFT 里能当 system。量很小
+- **[facebook/empathetic_dialogues](https://hf.co/datasets/facebook/empathetic_dialogues)** — 25k 会话
   - 取法：`parquet:hf://datasets/facebook/empathetic_dialogues@refs/convert/parquet/default/train/*.parquet:prompt+utterance`
   - cc-by-nc-4.0，情绪陪伴向。**一行一句**，取字段要写 `prompt+utterance`：用 `-` 会把 `conv_id`/
     `speaker_idx`/情绪标签一起拼进去。⚠️ 逗号被转义成 `_comma_`，要还原。只有加载脚本
-- **[Fishball02/topical-chat](https://hf.co/datasets/Fishball02/topical-chat)** — ✅ MTurk；9.7k 会话
+- **[Fishball02/topical-chat](https://hf.co/datasets/Fishball02/topical-chat)** — 9.7k 会话
   - 取法：`hf:Fishball02/topical-chat:-:default:train`
   - Topical-Chat 的镜像（官方 `Conversational-Reasoning/Topical-Chat` 已加载失败、无 parquet 分支）。
     两人无预设角色、知识带聊，接近真实网聊。⚠️ 文本带 `<s>[agent_1]…</s><s>[agent_2]…</s>` 标记，要剥掉
-- **[mylesmharrison/cornell-movie-dialog](https://hf.co/datasets/mylesmharrison/cornell-movie-dialog)** —
-  ✅ 剧本；305k 行
+- **[mylesmharrison/cornell-movie-dialog](https://hf.co/datasets/mylesmharrison/cornell-movie-dialog)** —剧本；305k 行
   - 取法：`parquet:hf://datasets/mylesmharrison/cornell-movie-dialog@refs/convert/parquet/default/train/*.parquet:text`
   - 影视对白，口语味足、情绪起伏大。⚠️ **每行一句**不是整段会话，且带角色名前缀（`BIANCA   They do
     not!`）与 `\r\n`，要按角色切分并去掉前缀。官方 `cornell-movie-dialog/cornell_movie_dialog` 无 parquet
     分支，已不可用
-- **[thu-coai/esconv](https://hf.co/datasets/thu-coai/esconv)** — ✅ 人写；1.3k 段对话
+- **[thu-coai/esconv](https://hf.co/datasets/thu-coai/esconv)** —1.3k 段对话
   - 取法：`hf:thu-coai/esconv:text:default:train`
   - 情感支持对话；量很小。⚠️ `text` 字段实测是**一整条 JSON 字符串**（含 `experience_type` 等键），要么
     改嵌套字段路径，要么先清洗
-- **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `v-corpus-en/**`** — ✅ 剧本【流行文化】；
+- **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `v-corpus-en/**`** — 剧本；
   135 个 `.txt.gz` / 69.3 MB 压缩，抽样 2.86 字符/压缩字节 → ≈200M 字符 ≈ **50M token 量级**（Han 0.00，
   纯英文）
   - 取法：同 §1.1 的 `v-corpus-zh`：解压 → 拆行 → `jsonl:`
   - 英文视觉小说台词，格式与中文侧一致（`角色名：「台词」`），是该桶最大的一份人类写作文本（+≈50M，
     该桶池子与顺序见本节末）
-- **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `emoji/kajiwoto.txt.gz`** — ⚠️ 模型生成；
+- **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `emoji/kajiwoto.txt.gz`** — ⚠️ 合成；
   6.70M 字符 / 147k 行（Han 0.00）≈ **1.7M token**
   - 取法：解压 → 按行落 jsonl → 作为该桶的额外 `--source`
   - 目录名叫 emoji，内容是 **`user：`/`gpt：` 的英文对话日志**（kajiwoto 是 AI 角色平台），`gpt：` 一侧
     是模型生成，角色扮演味重。⚠️ 整份 6.7M 字符会被 `txt:` 当成一篇并因 `--max_doc_chars` 整篇丢掉，
     必须按行拆；`user：`/`gpt：` 前缀要在清洗时去掉
 
-除 SODA 外，英文桶里**真人写的小集各自带格式噪声**（标点前空格、`_comma_`、`<s>[agent_1]` 标记、角色名
+除 SODA 外，英文桶里**真人写的小集带格式噪声**（标点前空格、`_comma_`、`<s>[agent_1]` 标记、角色名
 前缀、整条 JSON 字符串），进桶前都要过一遍。
 
 该桶的池子：soda 191M + 真人小集 17M = 208M → b-corpus `v-corpus-en`/`emoji` +52M →
-`TinyStoriesV2` +550M ≈ **810M**，其中三分之二是合成语料（SODA 蒸馏自 InstructGPT、TinyStoriesV2 出自
-GPT-4）。
+`TinyStoriesV2` +550M ≈ **810M**
 
 `--source` 的顺序是 `TinyStoriesV2` → SODA → 真人小集。桶内顺序**不是**训练顺序（`TokenMixer` 对整桶的
 窗口做 shuffle 采样），它只决定两件事：cap 卡住时先读谁——cap 低于 `TinyStoriesV2` 自己的 550M，排在它
@@ -189,7 +161,7 @@ GPT-4）。
 - **[wdndev/webnovel-chinese](https://hf.co/datasets/wdndev/webnovel-chinese)** — 网文；600k 章 / 3.2 GB
   （实测 1.68B 字符 ≈ 1.18B token）
   - 取法：`hf:wdndev/webnovel-chinese:text:default:train`
-  - 该桶主力（原本是池子的全部）。字段干净（`title`/`chapter`/`text`），parquet 分支就是小说的全量池，
+  - 该桶主力。字段干净（`title`/`chapter`/`text`），parquet 分支就是小说的全量池，
     一遍读完；apache-2.0
 - **[Miaowuawa/ChineseNovels](https://hf.co/datasets/Miaowuawa/ChineseNovels)** — 网文；2,292 本 / 623 MB
   parquet，抽样 300 本中位 22.3 万字符（Han 0.80）→ 全量 ≈755M 字符 ≈ **529M token**；`--max_doc_chars`
@@ -208,19 +180,17 @@ GPT-4）。
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `近现代小说/**`** — 出版小说【流行文化】；
   43 个 `.txt.gz` / 15.0 MB，抽样 0.78 字符/压缩字节 → ≈11.7M 字符 ≈ **8.2M token**
   - 取法：解压 → 按章落 jsonl → 作为该桶的额外 `--source`
-  - 张承志《黑骏马》这类近现代小说，简体、叙事完整。⚠️ 上游以 cc-by-nc-sa-4.0 发布，但内容是出版作品
-    本身，授权链不清；`txt:` 一个文件一篇文档，长篇要拆章
+  - 张承志《黑骏马》这类近现代小说，简体、叙事完整。⚠️ `txt:` 一个文件一篇文档，长篇要拆章
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `翻译名著/**`** — 翻译小说【流行文化】；
   18 个 `.txt.gz` / 9.2 MB，抽样 0.82 字符/压缩字节 → ≈7.5M 字符 ≈ **5.3M token**
   - 取法：同上
-  - 《小王子》《一千零一夜》这类中文译本，叙事文本；授权问题同 `近现代小说`
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `轻小说/**`** — 轻小说【流行文化】；
   1 个 `.txt.gz` / 0.1 MB ≈ 0.1M 字符 ≈ **0.07M token**
   - 取法：同上
   - 《可塑性记忆 Heartfelt Thanks》，量小，随该桶一起进
 
 该桶原本的 1.176B token 是 `wdndev/webnovel-chinese` parquet 分支的全量（网文，一遍读完）；b-corpus 再补
-`互动小说`（≈149M，同人、未清洗）与 `近现代小说`/`翻译名著`/`轻小说`（≈14M，出版作品、授权链不清），
+`互动小说`（≈149M，同人、未清洗）与 `近现代小说`/`翻译名著`/`轻小说`，
 池子 ≈1.34B；`Miaowuawa/ChineseNovels` 再补 ≈254M token（整本一篇，不拆章就只进每本前 200k 字符），
 池子 ≈1.59B。真公版书（b-corpus `古籍`）偏文言文，是风格污染，不进该桶。
 
@@ -228,9 +198,7 @@ GPT-4）。
 
 - **[wangrui6/Zhihu-KOL](https://hf.co/datasets/wangrui6/Zhihu-KOL)** — 长文；1.0M 条 / 1.5 GB parquet
   （实测 0.72B 字符 ≈ 0.51B token）
-  - 取法：`hf:wangrui6/Zhihu-KOL:RESPONSE:default:train`
-  - 真人类写的**长回答**（实测 600–6700 字），不属于 IM 闲聊，放进该桶补篇章连贯性；原本是该桶唯一的源，
-    一遍读完；无 license 声明
+  - 真人类写的**长回答**（实测 600–6700 字），不属于 IM 闲聊，放进该桶补篇章连贯性；
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `提高逼格/history_24/**`** — 白话史书
   【流行文化】；38 个 `.txt.gz` / 26.9 MB，抽样 0.75 字符/压缩字节 → ≈20.1M 字符 ≈ **14.1M token**
   - 取法：解压 → 按章落 jsonl → 作为该桶的额外 `--source`
@@ -238,16 +206,11 @@ GPT-4）。
     文件一篇文档，要拆章
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `畅销书/**`** — 非虚构【流行文化】；
   4 个 `.txt.gz` / 1.1 MB，抽样 0.80 字符/压缩字节 → ≈0.9M 字符 ≈ **0.6M token**
-  - 取法：同上
-  - 《人类简史》《追风筝的人》这类叙事型非虚构。⚠️ 出版作品，授权链不清
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `散文集/**`** — 散文【流行文化】；
   5 个 `.txt.gz` / 1.1 MB，抽样 0.75 字符/压缩字节 → ≈0.8M 字符 ≈ **0.6M token**
-  - 取法：同上
   - 余秋雨《中国文脉》这类散文，篇章连贯、书面语，补该桶文体。⚠️ 授权同上
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `古籍/**`** — 古籍（**慎用**）【流行文化】；
   16 个 `.txt.gz` / 11.4 MB，抽样 0.75 字符/压缩字节 → ≈8.5M 字符 ≈ **6.0M token**
-  - 取法：同上
-  - 《史记》《古文观止》《人间词话》原文，文言与古汉语语法会渗进生成，要用先筛白话子集
 
 ### 1.5 wiki — 通识 / 百科 / 常识
 
@@ -273,19 +236,16 @@ GPT-4）。
     前必须剥模板/表格/注释、保留正文与 `'''强调'''`，并按 `--max_doc_chars` 截断——超过默认 200000 的长页
     只进前 200k 字符。清洗后 Han 比例会显著回升，token 数要重测，不能直接按 291M 字符配比
 
-**"通识内容会不会太少"的答案不在数据侧**：116.65M 参数能存下的事实本来就有限，
-超过容量后不同事实还会互相干扰；要动手先补知识评测，而不是继续加百科（[training.md §2](training.md)）。
-
 ### 1.6 roleplay — 人设卡 / 多轮扮演
 
 - **[shibing624/roleplay-zh-sharegpt-gpt4-data](https://hf.co/datasets/shibing624/roleplay-zh-sharegpt-gpt4-data)**
   — 角色扮演；`evol-gpt4` 档 2.8k 条 / 2.7 MB ≈ 1.5M token
   - 取法：`hf:shibing624/roleplay-zh-sharegpt-gpt4-data:-:sharegpt_formatted_data-evol-gpt4:train`
-  - 带 `system_prompt` 人设，AI 生成，助理腔要过滤
+  - 带 `system_prompt` 人设，AI 生成
 - **[Johnson8187/role-play-chinese](https://hf.co/datasets/Johnson8187/role-play-chinese)** — 角色扮演；
   22.4k 条 / 9.0 MB ≈ 10.3M token
   - 取法：`hf:Johnson8187/role-play-chinese:-:default:train`
-  - `instruction`/`input`/`output`/`system`，人设齐全。AI 生成，同样要过滤
+  - `instruction`/`input`/`output`/`system`，人设齐全。AI 生成
 - **[LooksJuicy/Chinese-Roleplay-SingleTurn](https://hf.co/datasets/LooksJuicy/Chinese-Roleplay-SingleTurn)**
   — 角色扮演【流行文化】；7,593 条 / **4.66M 字符 ≈ 3.3M token**
   - 取法：`hf:LooksJuicy/Chinese-Roleplay-SingleTurn:-:default:train`
@@ -298,8 +258,7 @@ GPT-4）。
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `q-corpus/**`** — 角色场景【流行文化】；
   61 个 `.txt.gz` / 3.8 MB，抽样 0.82 字符/压缩字节 → ≈3.1M 字符 ≈ **2.2M token**
   - 取法：解压 → 按场景落 jsonl → 作为该桶的额外 `--source`
-  - 情境化的角色扮演文本（`Choice_选择`、`侠女` 等），第二人称场景 + 对白，语气贴近该桶。⚠️ 内容是 R18，
-    要逐篇筛；`txt:` 一个文件一篇文档，要按场景拆
+  - 情境化的角色扮演文本（`Choice_选择`、`侠女` 等），第二人称场景 + 对白，语气贴近该桶。`txt:` 一个文件一篇文档，要按场景拆
 
 ### 1.7 roleplay_char — 小说 / 影视角色的单轮问答
 

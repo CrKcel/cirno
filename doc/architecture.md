@@ -1,8 +1,7 @@
 # Cirno-130M 架构
 
 Cirno-130M 是一个约 130M 参数的混合视觉语言模型：20 层 decoder 按 **3 层 Gated DeltaNet（线性注意力）
-: 1 层 Gated Attention（全注意力）** 交替，外挂一个 6 层 ViT 和一个 MTP 块。所有超参都在
-[`configs/hvlm_130m.json`](../configs/hvlm_130m.json) 里。
+: 1 层 Gated Attention（全注意力）** 交替，外挂一个 6 层 ViT 和一个 MTP 块。超参在[`configs/hvlm_130m.json`](../configs/hvlm_130m.json) 。
 
 ## 1. 模型设计
 
@@ -17,10 +16,6 @@ Cirno-130M 是一个约 130M 参数的混合视觉语言模型：20 层 decoder 
 | 视觉塔 | ViT 6 层 / 384 维 / 6 头，224px、patch16，2×2 merge + 两层 MLP 投影 | 每图 49 个 LLM token，约 14.4M 参数 |
 | MTP | 1 个 MTP 块（融合 hidden[t] 与 embed[t+1]，一层全注意力 decoder，共享词表头）预测 t+2 | |
 | 词表 | 32768，中英代码字节级 BPE；LM 头与词嵌入共享 | |
-
-关于 delta rule 的递推式、chunk 内并行算法以及三种 `impl` 的语义差别，见
-[`hvlm/gated_delta.py`](../hvlm/gated_delta.py) ；数值等价性由
-`tools/check_algorithms_numpy.py`（chunk ≡ 递推）和 `tests/test_model.py`（fp32/bf16/fla 对照）保证。
 
 ## 2. 参数量
 
