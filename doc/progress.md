@@ -14,11 +14,8 @@
 - **chat 桶是最紧的一环**：LCCC base+large 453M + 字幕有效 428M + b-corpus `v-corpus-zh` ≈130M ≈ 1.01B
   token；配方已经让它读 1.20 遍（退火段 41.4%），全程对话 37.5%。再往上只能扩源：修好卡拉OK 问题后的
   字幕余量、播客/群聊转写。
-- **语料清洗剩下的缺**：b-corpus 的六个桶、萌娘百科原始 wikitext、两个 JSON 数组角色扮演集（LooksJuicy、
-  猫娘）与带标记噪声的英文小集已由 `scripts/prepare_local_data.py` 落成 `data/<bucket>/*.jsonl`
-  （b-corpus 424.6M 字符 + 萌娘 72.1M 字符，映射见 `doc/datasets.md` §1）。还没做的是内容侧的筛：
-  `q-corpus`（61 个文件）是 R18，要逐篇筛；`Miaowuawa/ChineseNovels` 整本一篇（中位 22.3 万字符），要拆章，
-  否则每本只进前 200k 字符；`古籍` 偏文言文，是否留在 long 桶要看训练后的语体评测。清洗产物变了就按新的
+- **语料清洗剩下的缺**：还没做的是内容侧的筛：
+  `Miaowuawa/ChineseNovels` 整本一篇（中位 22.3 万字符），要拆章，否则每本只进前 200k 字符；`古籍` 偏文言文，是否留在 long 桶要看训练后的语体评测。清洗产物变了就按新的
   `train_tokens` 用 `tools/plan_mix.py` 重算三段权重与各桶 `--max_tokens`。
 - **SFT 来源的报告**：`--mm_weights` 已经能按目标份额采样，但还没有各来源的行数/长度分布报告，要做形态评测得先有这份报表。
 - **分片顺序偏差**：`prepare_data` 按 `parquet:` glob 的排序顺序读、遇 `--max_tokens` 即停，而分片顺序

@@ -1,7 +1,6 @@
 # Cirno-130M 架构
 
-Cirno-130M 是一个约 130M 参数的混合视觉语言模型：20 层 decoder 按 **3 层 Gated DeltaNet（线性注意力）
-: 1 层 Gated Attention（全注意力）** 交替，外挂一个 6 层 ViT 和一个 MTP 块。超参在[`configs/hvlm_130m.json`](../configs/hvlm_130m.json) 。
+Cirno-130M 是一个约 130M 参数的混合视觉语言模型：20 层 decoder 按 3 层线性注意力: 1 层全注意力 交替，外挂一个 6 层 ViT 和一个 MTP 块。
 
 ## 1. 模型设计
 
@@ -19,15 +18,13 @@ Cirno-130M 是一个约 130M 参数的混合视觉语言模型：20 层 decoder 
 
 ## 2. 参数量
 
-`python tools/estimate.py configs/hvlm_130m.json` 的输出（与 `tests/test_model.py::test_param_count_matches_estimator` 对齐）：
-
 | 部分 | 参数 |
 |---|---|
 | 词嵌入（= LM 头） | 20.97 M |
 | 20 层 decoder | 95.68 M（线性层 4.77M，全注意力层 4.83M） |
-| **纯 LLM（推理）** | **116.65 M** |
+| **纯 LLM** | **116.65 M** |
 | 视觉塔 + 投影 | 14.36 M |
-| **LLM + 视觉（推理）** | **131.0 M** |
+| **LLM + 视觉** | **131.0 M** |
 | MTP | 5.66 M |
 | **训练时总计** | **136.7 M** |
 
