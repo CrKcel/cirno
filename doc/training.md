@@ -48,6 +48,13 @@
   | 角色扮演语料 | — | — | 1.93% | 15.4M | 15.4M | 1.00 遍 |
   | 代码 / 数学 / 专业长文 | — | — | — | — | — | — |
 
+  **新增语料让池子超过预算**：`Limour/b-corpus` 的正文类目录已全部归入各桶（chat +130M、en_chat +52M、
+  fiction +163M、long +21M、roleplay +2.2M、roleplay_char +1.6M），英文桶另加
+  `noanabeshima/TinyStoriesV2`（+≈550M），池子从 ≈4.13B 升到 **≈5.05B**（估算与取法见
+  [datasets.md §1](datasets.md)）。表里的池子、"全程 token"与实际遍数是入桶前的实测值；数据落盘、
+  `prepare_data` 跑出新的 `train_tokens` 之后，三段权重与 `--max_tokens` 都要用 `tools/plan_mix.py`
+  重算，届时每个桶都读不满一遍。
+
   每段的理由：
 
   1. **A 长文（0.9B，seq 2048）**：最早的 token 在最高 lr 下训练、梯度更新最大，决定基底分布，所以
@@ -68,25 +75,30 @@
   再往上加总预算时，能加的还是只有非对话桶——理由见下一条。
 - **chat 桶是唯一的硬约束**：公开中文人类闲聊加总约 **0.88B token**（LCCC base+large 453M，其中 base
   是 large 的清洗子集、两者重叠约 30%；字幕清洗后有效 428M）。按一遍算，chat 占预算 22%，这就是本
-  配方最大的短板。想同时把对话占比拉回 1/3 只能扩源：MNBVC 的 `forum`/`blog`（要自己落成本地
-  parquet）、被卡拉OK 噪声占掉的字幕余量（先给 `clean_ass.py` 加逐字行过滤）、播客/群聊转写。
+  配方最大的短板。扩源有三条：`Limour/b-corpus` 的 `v-corpus-zh` 视觉小说台词（解压拆行后约 130M
+  token 量级，把该桶抬到 ≈1.01B，见 [datasets.md §1.1](datasets.md)）、MNBVC 的 `forum`/`blog`
+  （要自己落成本地 parquet）、被卡拉OK 噪声占掉的字幕余量（先给 `clean_ass.py` 加逐字行过滤）。
   改权重只会变成背语料。
-- **长文桶就是知乎的全部**（实测 1.006M 条 / 0.72B 字符 ≈ **0.51B token**，一遍读完）。Fineweb-Edu
-  不再进配方：`4_5/*.parquet` 按来源语料分组，只取头几片就是清一色 `CCI3`（见 §5 的分片顺序表），
-  而长文池已经被知乎填满。
-- **"多来点人类写的小说"在开源界没有好增量**：现代出版小说有版权、不存在；真公版书
-  （`wikimedia/wikisource`）实测 68% 偏文言文，是风格污染；剩下能上量的只有网文，所以小说这一侧
-  1.176B token 就是 `wdndev/webnovel-chinese` parquet 分支的全量（600k 章 / 1.68B 字符），一遍读完。
+- **长文桶以知乎为主**（实测 1.006M 条 / 0.72B 字符 ≈ **0.51B token**，一遍读完）；b-corpus 的
+  `提高逼格`（白话二十四史）、`畅销书`、`散文集`（合计 ≈15M token）与 `古籍`（文言，慎用，≈6M）也归
+  该桶，池子 ≈527M。Fineweb-Edu 不再进配方：`4_5/*.parquet` 按来源语料分组，只取头几片就是清一色
+  `CCI3`（见 §5 的分片顺序表），而长文池已经被知乎填满。
+- **小说这一侧**：真公版书（`wikimedia/wikisource`、b-corpus `古籍`）偏文言文，是风格污染；能上量的
+  网文是 `wdndev/webnovel-chinese` parquet 分支的全量（600k 章 / 1.68B 字符 ≈ 1.176B token，一遍
+  读完）。b-corpus 再补 `互动小说`（同人、未清洗，≈149M token）与 `近现代小说`/`翻译名著`/`轻小说`
+  （≈14M，出版作品、授权链不清），池子 ≈1.34B。
 - **通识：瓶颈在参数量**。知识桶全程 1.215B token（30.4%），是唯一池子大于配额的桶：百度百科
   parquet 分支实测 1.73M 条 / 1.92B 字符 ≈ **1.34B token**，配比取它的 90%（它按"常见词 → 冷门实体"
   排序，截断掉的正好是长尾）。中文维基实测只有 1.38M 篇 / 1.05B 字符 ≈ **0.74B token**，比旧估算的
-  2.05B 小得多，事实密度也不如百度百科，因此不进配方。**"通识内容会不会太少"的答案不在数据侧**：
+  2.05B 小得多，事实密度也不如百度百科，因此不进配方。萌娘百科（`mrzjy/chinese_moegirl_wiki_corpus_raw`）
+  是 ACG 梗与术语最密的一份，但原始 wikitext 要先剥模板/表格（见 [datasets.md §1.5](datasets.md)），
+  清洗后可作该桶候选。**"通识内容会不会太少"的答案不在数据侧**：
   116.65M 参数能存下的事实本来就有限，超过容量后不同事实还会互相干扰（同一批权重塞进更多事实，
   反而压低已记住那些的召回）。按性价比排序，真正能改善通识的四件事：
   1. **先测**：现在没有知识评测。先写 50–200 题的常识集（天气 / 心情 / 身边事 / 简单事实
      + 若干"该答不知道"的题），用**生成**而不是 ppl 打分。否则就是在给一个没量过的缺口加数据。
   2. **提事实密度而不是提量**：百度百科是短条目，比中文维基的论述型长文更贴近"一句话把事实说清楚"的形态；
-     改用 `title+summary` 取字段能把每 token 的事实密度再抬一截（中位字数见 [datasets.md §1](datasets.md)）。
+     改用 `title+summary` 取字段能把每 token 的事实密度再抬一截（中位字数见 [datasets.md §1.5](datasets.md)）。
   3. **课程安排**：知识桶更多地压进 WSD 衰减阶段，晚期上采样的事实留存优于全程均匀铺开。当前配方里
      退火段给百科 28.4%（阶段 B 是 35.1%），但不是大比例过采样——退火段只有 0.8B。
   4. **形态差归 SFT**：目标行为是"闲聊里顺口答一句常识"，百科是论述文体。这个形态差要靠 SFT 补（简短、
@@ -217,10 +229,14 @@ python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/
     --source "jsonl:data/chat/subtitles.jsonl:text"                 # scripts/clean_ass.py --zh-only --t2s 的产物
     # 字幕必须用清洗产物：原始 `data` 字段是整份 .ass，200k 字符/篇的截断后仍有大量卡拉OK 逐字行
     # （见 progress.md TODO）。base 与 large 重叠约 30%，只在意唯一 token 时可以去掉 base。
-python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/en_chat --max_tokens 260000000 --val_tokens 1000000 \
-    --source "hf:allenai/soda:dialogue:default:train"               # 合成数据，占该桶绝大部分
-    # 真人写的英文小集接在 soda 之后（各自带格式噪声，见 datasets.md §1 英文对话表）。cap 260M 是全池
-    # 208M（soda 191M + 小集 17M）之上留了头寸：soda 排在最前，cap 只卡上限，估偏 20% 也不会把小集截掉：
+python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/en_chat --max_tokens 860000000 --val_tokens 1000000 \
+    --source "hf:noanabeshima/TinyStoriesV2:text:default:train"     # 排第一：cap 卡住时它优先，val.bin 也取自它
+    --source "hf:allenai/soda:dialogue:default:train"               # 合成数据，该桶第二大的一份
+    # 真人写的英文小集接在 soda 之后（各自带格式噪声，见 datasets.md §1.2）。cap 860M 是池子 ≈810M
+    # （TinyStoriesV2 550M + soda 191M + b-corpus 52M + 小集 17M）之上留的头寸，估偏了跑完
+    # tools/plan_mix.py 复核即可。桶内顺序不决定训练顺序（TokenMixer 对整桶窗口 shuffle），它只决定
+    # cap 优先级与 val 来源：cap 低于 TinyStoriesV2 自己的 550M 时后面的源一个 token 都进不来，
+    # 而 val.bin 取的是列表头的 1M token：
     #   hf:ParlAI/blended_skill_talk:free_messages:default:train
     #   hf:Fishball02/topical-chat:-:default:train
     #   parquet:hf://datasets/li2017dailydialog/daily_dialog@refs/convert/parquet/default/train/*.parquet:dialog
@@ -243,7 +259,7 @@ python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/
 python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/roleplay_char --max_tokens 3600000 --val_tokens 100000 \
     --source "parquet:hf://datasets/silk-road/ChatHaruhi-54K-Role-Playing-Dialogue@refs/convert/parquet/default/train/*.parquet:user_question+agent_response"
 # 猫娘：kxdw2580/catgirl-dataset 是 gated、JSON 数组、回答内联 `<think>`，字段表达式清不掉思维链，
-# 要先落成本地 jsonl（去掉 `<think>` 与残留标签）再 tokenize（见 datasets.md §1）
+# 要先落成本地 jsonl（去掉 `<think>` 与残留标签）再 tokenize（见 datasets.md §1.8）
 python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/roleplay_catgirl --max_tokens 180000 --val_tokens 20000 \
     --source "jsonl:data/roleplay_catgirl/*.jsonl:text"
 
@@ -287,7 +303,7 @@ python scripts/train.py --stage sft --tokenizer tokenizer \
   `-` 取整条记录。文档之间用 `<|endoftext|>` 分隔，产物是扁平 uint16 token 流 + `meta.json`。
 - `parquet:` 也接受远端 `hf://` glob，例如
   `parquet:hf://datasets/silver/lccc@refs/convert/parquet/base/train/*.parquet:dialog`。这条写法有几种用途：
-  读只带加载脚本的集（LCCC / DailyDialog / EmpatheticDialogues 等，规则见 [datasets.md §1](datasets.md)
+  读只带加载脚本的集（LCCC / DailyDialog / EmpatheticDialogues 等，规则见 [datasets.md §0](datasets.md)
   开头）、以及取 Fineweb-Edu-Chinese 某个分数档（`4_5/*.parquet`，它不是 config）。路径里的 `@refs/...`
   是 revision，不是 `@N` 文档上限。
 - **`--desegment`**：去掉汉字之间的空格，给分词型语料用（`silver/lccc` 的 `dialog`、以及任何由它派生的

@@ -14,6 +14,9 @@ cd "$(dirname "$0")/.."
 #            # the `scripts/clean_ass.py --zh-only --t2s` output: the raw `data` field is the whole .ass
 #            # script (headers, style tables, karaoke timing), and 1,470 of the 59,806 episodes hit
 #            # prepare_data.py's 200k-char cut (largest 67 MB) with karaoke runs like `佐\n佐\n佐...`
+#   EN       hf:noanabeshima/TinyStoriesV2:text:default:train          # en, ~550M tok; GPT-4 short stories
+#            # (CDLA-Sharing-1.0), deliberately simple narrative.  Listed FIRST: it is what a cap that binds
+#            # reads first, and it is what val.bin is taken from (see the EN paragraph below).
 #   EN       hf:allenai/soda:dialogue:default:train                   # en, ~190M tok; INSTRUCTGPT-GENERATED
 #   EN       hf:ParlAI/blended_skill_talk:free_messages:default:train # en, crowd-sourced: persona + empathy + knowledge
 #   EN       hf:Fishball02/topical-chat:-:default:train               # en, MTurk; strip the <s>[agent_1] markup
@@ -39,14 +42,37 @@ cd "$(dirname "$0")/.."
 #   WIKI     parquet:hf://datasets/lars1234/baidu-baike-dataset@refs/convert/parquet/default/partial-train/*.parquet:-
 #                                                                     # 简体白话百科；parquet 3.2 GB，
 #                                                                     # `hf:` 直连会拉 16.8 GB 的原始 json
+#   ---- Limour/b-corpus, in full (cc-by-nc-sa-4.0 + not-for-all-audiences) ----
+#   Every corpus in that repo is one .txt.gz per work, mixed in with the uploader's own extractor
+#   scripts, so each directory needs the same pre-step - decompress, split per line/chapter, drop the
+#   `角色名：` / `system：` prefixes, write jsonl into the matching local dir (doc/datasets.md 1 has the
+#   measured size of each one).  Bucket mapping:
+#     v-corpus-zh   (820 gz / 188 MB)  -> CHAT      data/chat/          visual-novel dialogue
+#     v-corpus-en   (135 gz /  69 MB)  -> EN        data/en_chat/       same, English side
+#     emoji         (  1 gz / 2.1 MB)  -> EN        data/en_chat/       `user：`/`gpt：` chat log
+#     ChatHaruhi    ( 38 gz / 2.5 MB)  -> CHAR      data/roleplay_char/ one file per character
+#     q-corpus      ( 61 gz / 3.8 MB)  -> ROLEPLAY  data/roleplay/      R18 scenario text, filter first
+#     近现代小说 / 翻译名著 / 轻小说 -> FICTION data/fiction/ (published works, provenance unclear)
+#     提高逼格 / 畅销书 / 散文集 / 古籍 -> LONG data/long/ (古籍 is 文言, style pollution)
+#     互动小说 is mrzjy/Chinese_interactive_novels_3k; read it from the Hub instead of unpacking the
+#     7z parts - `parquet:hf://datasets/mrzjy/Chinese_interactive_novels_3k@refs/convert/parquet/default/train/*.parquet:book_chapter`
+#     - and drop `content_tag`/`role` before writing, the field expression cannot.  00-preview/ and the
+#     per-work *.py are statistics and extractors, not corpora.
+#   With b-corpus and TinyStoriesV2 in, every bin's pool is larger than the --max_tokens in step 1, and
+#   those caps are the pre-addition values (EN already carries its raised 860M, because its new first
+#   source is what a low cap would cut): raise each remaining one above its new pool, then re-derive the
+#   three --data strings of step 2 with tools/plan_mix.py from the new meta.json (doc/training.md 2).
 # The EN bucket exists because allenai/soda is large (measured: 1.2M conversations, mean 632 chars of
 # dialogue, ~191M tokens) - it is the only English set that can carry a weight.  It is synthetic
 # (InstructGPT distilled on commonsense triples, `language_creators:machine-generated`); the human-written
-# sets add up to ~17M tokens (doc/datasets.md §1) and ride along in the same bucket for style diversity,
+# sets add up to ~17M tokens (doc/datasets.md §1.2) and ride along in the same bucket for style diversity,
 # each needing cleaning (DailyDialog spaces before punctuation, EmpatheticDialogues `_comma_`,
-# Topical-Chat `<s>[agent_1]`).  Order: soda first, the human-written sets after it.  The bin's cap
-# (260M) sits above the whole pool with headroom (soda 191M + the sets ~17M), because soda is read first:
-# a cap that only matches the estimate would let a tokenizer-ratio surprise cut the small sets off.
+# Topical-Chat `<s>[agent_1]`).  Order: TinyStoriesV2, then soda, then the human-written sets.
+# The bucket also takes b-corpus v-corpus-en + the kajiwoto log (~52M) and TinyStoriesV2 (~550M), so its
+# pool is ~810M.  Source order is a priority and validation knob, not a training order (TokenMixer
+# shuffles every window of a bin): prepare_data reads the list in order, so a --max_tokens below
+# TinyStoriesV2's own ~550M drops everything after it, and the first --val_tokens tokens - the bucket's
+# val.bin, which is what train.py scores ppl on - come from the head of the list, i.e. TinyStoriesV2.
 # Two things about the specs above, both of which bite silently:
 #   * LCCC / DailyDialog / EmpatheticDialogues / PersonaChat only ship a loading script, and `datasets`
 #     >= 4 refuses scripts.  The `parquet:hf://...@refs/convert/parquet/...:field` form reads the Hub's
@@ -54,10 +80,10 @@ cd "$(dirname "$0")/.."
 #     MNBVC is the exception: it has no parquet branch, so it is unreachable either way (see progress.md TODO).
 #   * LCCC's `dialog` is word-segmented (`你 去 那儿 竟然`), so everything that takes it is tokenised
 #     with --desegment, or the model learns to answer with spaces between characters.
-# This project is non-commercial, so the NC-licensed sets are fine to use; `doc/datasets.md` §1 flags the
+# This project is non-commercial, so the NC-licensed sets are fine to use; `doc/datasets.md` §1.4 flags the
 # sets with no licence at all (Zhihu-KOL) - those are the ones worth double-checking before publishing.
 CHAT="jsonl:data/chat/*.jsonl:text"                  # human-to-human chat / forum / subtitles (zh)
-EN="jsonl:data/en_chat/*.jsonl:text"                 # English conversation: soda first, then the human sets
+EN="jsonl:data/en_chat/*.jsonl:text"                 # English: TinyStoriesV2, soda, then the human sets
 FICTION="jsonl:data/fiction/*.jsonl:text"            # novels / scripts (dialogue-heavy)
 LONG="jsonl:data/long/*.jsonl:text"                  # long-form non-dialogue: articles, books, long answers
 ROLEPLAY="jsonl:data/roleplay/*.jsonl:text"          # persona cards + multi-turn role-play
@@ -70,7 +96,8 @@ WIKI="jsonl:data/wiki/*.jsonl:text"                  # general knowledge, keeps 
 #    * `@N` is a per-source budget, so it is picked from the mean document length, not by feel - a chat
 #      turn is ~35 chars and an article ~2800, so equal-looking N values would starve the target
 #      distribution.  The numbers below follow the pre-training token totals of step 2 (role-play excluded),
-#      i.e. roughly chat 22% / fiction 29% / wiki 30% / long 13% / en 5%;
+#      i.e. roughly chat 22% / fiction 29% / wiki 30% / long 13% / en 5%; b-corpus and TinyStoriesV2 change
+#      those totals (step 1), so re-estimate the N values together with the step 2 weights;
 #    * word-segmented corpora (LCCC) need --desegment or the merges are learned on spaced-out text;
 #    * numbers stay whole (`\p{N}+`), not digit-by-digit as in Qwen2.
 python scripts/train_tokenizer.py --out tokenizer --desegment \
@@ -82,8 +109,11 @@ python scripts/train_tokenizer.py --out tokenizer --desegment \
 #    are read to the end and `train_tokens` in <out>/meta.json is the pool every phase samples from.  A cap
 #    that binds stops the bin mid-source, which is a corpus left untrained, not a mixture correction - the
 #    weights come from those pools (tools/plan_mix.py) and no bin is asked for more than it holds.
+#    EN is the one bin whose list order makes its cap load-bearing: TinyStoriesV2 is listed first and is
+#    ~550M tokens on its own, so the 860M below (the estimated ~810M pool plus headroom) is what keeps
+#    soda and the human-written sets from being cut off entirely.
 python scripts/prepare_data.py --tokenizer tokenizer --desegment --source "$CHAT"     --out data/bin/chat     --max_tokens  884000000 --val_tokens 4000000
-python scripts/prepare_data.py --tokenizer tokenizer             --source "$EN"       --out data/bin/en_chat  --max_tokens  260000000 --val_tokens 1000000
+python scripts/prepare_data.py --tokenizer tokenizer             --source "$EN"       --out data/bin/en_chat  --max_tokens  860000000 --val_tokens 1000000
 python scripts/prepare_data.py --tokenizer tokenizer             --source "$FICTION"  --out data/bin/fiction  --max_tokens 1179000000 --val_tokens 2500000
 python scripts/prepare_data.py --tokenizer tokenizer             --source "$LONG"     --out data/bin/long     --max_tokens  508000000 --val_tokens 2000000
 python scripts/prepare_data.py --tokenizer tokenizer --desegment --source "$ROLEPLAY" --out data/bin/roleplay         --max_tokens   12000000 --val_tokens 200000

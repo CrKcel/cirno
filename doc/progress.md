@@ -36,7 +36,7 @@
 - **评测**：未集成对话评测，验证集只给出 ppl。缺人类盲测、越界拒答率/误拒率、回复长度分布、助理腔模式词命中等脚本。**尤其是没有知识评测**——想判断"通识够不够"必须先有 50–200 题的常识集（天气/心情/身边事/简单事实 + 若干"该答不知道"），用生成而不是 ppl 打分；在那之前"加百科"是盲加（见 `doc/training.md` §2）。
 - **拒答数据**：无内置越界 prompt 库与人类口吻拒答模板
 - **字幕集清洗**：`scripts/clean_ass.py`（`--zh-only --t2s`）。`chenrm/anime-subtitles` 的 `data` 字段是整份
-  `.ass`（见 `doc/datasets.md` §1），全量 11.43B 原始字符里只有 2.93B 是对白（25.6%）——不清洗等于把四分之
+  `.ass`（见 `doc/datasets.md` §1.1），全量 11.43B 原始字符里只有 2.93B 是对白（25.6%）——不清洗等于把四分之
   三的字幕 token 预算花在 `[Script Info]` 头、样式表和覆盖标签上。集内还混着 16.3 亿字符的日语（假名占多
   数），`--zh-only` 丢掉这些整集、并顺带删掉中文集里的假名 OP/ED 行（3.6% 的行）；约半数字幕组出繁体，
   `--t2s` 走 opencc 统一成简体（繁体标记字占比 4.74% → 0.33%）。产物 59,806 集 / 2.93B 字符。
@@ -47,15 +47,24 @@
 - **chat 桶是最紧的一环**：LCCC base+large 453M + 字幕有效 428M ≈ 0.88B token，按"每个桶一遍"的配方
   chat 只占预算 22%。想把对话占比拉回 1/3，只能扩源：MNBVC 的 `forum`/`blog`（落本地 parquet）、修好
   卡拉OK 问题后的字幕余量、播客/群聊转写。
+- **流行文化语料没有清洗脚本**：`Limour/b-corpus` 全量已归入六个桶（1,819 个文件 / 552.6 MB，新增
+  ≈370M token，映射见 `doc/datasets.md` §1），但每个子目录都要同一个前置步骤：解压 `.txt.gz`、按行
+  或按章、按场景切分、去掉 `角色名：`/`system：` 前缀，仓库里还混着 130 多个 `.py`/`.bat` 提取脚本；
+  `互动小说`（mrzjy 3k，≈149M token）自标 uncleaned，且 `content_tag`/`role` 只能在落盘时丢掉；
+  `q-corpus` 是 R18，要逐篇筛。另外 `mrzjy/chinese_moegirl_wiki_corpus_raw` 是原始 wikitext
+  （实测 99.6% 的条目含 `[[`、91.5% 含 `{{`，Han 比例只有 0.34），要剥模板/表格/注释并按篇截断。
+  清洗落盘后按新的 `train_tokens` 用 `tools/plan_mix.py` 重算三段权重与各桶 `--max_tokens`。现状与
+  取法见 `doc/datasets.md` §1.1 / §1.5 / §1.7。
 - **MNBVC 取不到**：它没有自动转换的 parquet 分支（`refs/convert/parquet` revision 不存在），所以
   `parquet:hf://` 也拿不到它——论坛语料暂时不可用。两条路：把 `datasets`
   钉到 3.x（回退加载脚本），或把 MNBVC 落成本地 parquet/jsonl 再喂。
 - **英文对话清洗**：英文桶里**真人写的小集**各自带格式噪声，进桶前都要过一遍（逐集的字段/噪声说明见
-  `doc/datasets.md` §1 英文对话表）；只有 SODA 干净，不用清洗。
-- **SODA 是合成语料**：它占英文桶（5%）的绝大部分，却是 InstructGPT 蒸馏出来的（`language_creators:
-  machine-generated`），偏离 `doc/training.md` §0"用人类对话调风格"的原则；定性、抽查结论与「为什么不加
-  英文百科」都写在 `doc/datasets.md` §1 英文对话部分。仍需评测覆盖：在 `doc/training.md` §6 的回复长度
-  分布与助理腔模式词统计里单独看它的影响，中文闲聊一旦回退就优先降它的权重。
+  `doc/datasets.md` §1.2 英文对话表）；只有 SODA 干净，不用清洗。
+- **英文桶以合成语料为主**：SODA 是 InstructGPT 蒸馏出来的（`language_creators:machine-generated`），
+  新增的 `noanabeshima/TinyStoriesV2`（≈550M token）是 GPT-4 生成的儿童故事且是叙事不是对话，两者合计
+  约占该桶九成，都偏离 `doc/training.md` §0"用人类对话调风格"的原则；定性、抽查结论与「为什么不加英文
+  百科」都写在 `doc/datasets.md` §1.2 英文对话部分。仍需评测覆盖：在 `doc/training.md` §6 的回复长度
+  分布与助理腔模式词统计里单独看它们的影响，中文闲聊一旦回退就优先降它们的权重。
 - **SFT 没有配比控制点**：`ChatDataset` 把 `--mm_data` 的各项**按行数拼接**成一个 offsets 列表，没有权重
   参数——`human_dialog.jsonl : persona.jsonl : refuse.jsonl` 的比例谁的行数多谁说了算，`doc/training.md`
   §4.4 要求的"拒答 2–8%"目前只能靠人工数行数落实。所以说"对话比例放到 SFT 调"在当前代码里**没有可调的
