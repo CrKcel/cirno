@@ -1,0 +1,530 @@
+#!/usr/bin/env python
+"""Turn the local Hub snapshots under /mnt/data/LLM/hf into the jsonl the recipe reads.
+
+`doc/datasets.md` names the cleaning each source needs before it can enter a bucket.  Everything a
+`parquet:` / `jsonl:` spec can read straight from the snapshot is left where it is; this script only
+writes the sources whose cleaning happens at the text level and which therefore cannot be expressed as
+a field expression:
+
+    b-corpus       `.txt.gz` works, decompressed and split into documents
+    moegirl        raw wikitext: templates, tables, comments and markup stripped
+    JSON arrays    LooksJuicy / catgirl answer sets, plus the catgirl chain-of-thought removal
+    English sets   DailyDialog / EmpatheticDialogues / Topical-Chat / Cornell / ESConv noise
+
+`run_pipeline.sh` reads the result through its `data/<bucket>/*.jsonl` globs, and never dereferences an
+`hf:` spec, so a run needs no network access.  The snapshots themselves are described in
+`/mnt/data/LLM/README.md`; `--snapshot` points at that directory.
+
+    python scripts/prepare_local_data.py                     # every job into data/
+    python scripts/prepare_local_data.py --only bcorpus_zh moegirl
+    python scripts/prepare_local_data.py --list
+"""
+import argparse
+import glob
+import gzip
+import json
+import os
+import re
+import sys
+
+DEFAULT_SNAPSHOT = "/mnt/data/LLM/hf"
+BCORPUS = "Limour--b-corpus"
+# Documents are cut at ~this many characters, at line boundaries.  A whole visual-novel script or novel
+# is one file; without the cut each would be a single document and `prepare_data --max_doc_chars` would
+# silently keep only its head.
+CHUNK_CHARS = 4000
+
+JOBS = {}
+
+
+def job(name, out, sources=()):
+    def register(fn):
+        JOBS[name] = dict(out=out, fn=fn, sources=list(sources))
+        return fn
+    return register
+
+
+# ------------------------------------------------------------------------------------------------
+# output
+# ------------------------------------------------------------------------------------------------
+class Sink:
+    """Write `{"text": ...}` jsonl (or raw records) atomically, one file per bucket source."""
+
+    def __init__(self, path, records=False):
+        self.path = path
+        self.records = records
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        self.tmp = path + ".part"
+        self.f = open(self.tmp, "w", encoding="utf-8")
+        self.docs = self.chars = 0
+
+    def write(self, text):
+        text = text.strip()
+        if not text:
+            return
+        self.f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
+        self.docs += 1
+        self.chars += len(text)
+
+    def write_record(self, rec):
+        self.f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        self.docs += 1
+        if "messages" in rec:
+            self.chars += sum(len(m.get("content") or "") for m in rec["messages"])
+        else:
+            self.chars += len(rec.get("text") or "")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, *_):
+        self.f.close()
+        if exc_type is None:
+            os.replace(self.tmp, self.path)
+        else:
+            os.remove(self.tmp)
+
+
+# ------------------------------------------------------------------------------------------------
+# text helpers
+# ------------------------------------------------------------------------------------------------
+_QUOTE_START = "「『“‘\"（(【["
+
+
+_SPEAKER = re.compile(r"^([^\s：:]{1,10})[：:]\s*(.*)$", re.S)
+_SPEAKER_NAMES = {"user", "gpt", "system", "assistant", "旁白", "旁白君", "系统", "画外音"}
+
+
+def strip_speaker(line):
+    """Drop a `角色名：` / `user：` prefix, keeping prose that merely contains a colon.
+
+    b-corpus and ChatHaruhi tag every turn (`秦绢：「…」`, `gpt：…`), which would otherwise be trained as
+    text.  A prefix is only removed when the rest starts with a quote/parenthesis or when the name is a
+    known marker, so a narration line such as `相信我：这就是…` keeps its clause."""
+    m = _SPEAKER.match(line)
+    if not m:
+        return line
+    name, rest = m.group(1), m.group(2)
+    if rest[:1] in _QUOTE_START or name.lower() in _SPEAKER_NAMES:
+        return rest
+    return line
+
+
+def clean_line(line):
+    return strip_speaker(line.replace("\ufeff", "").strip()).rstrip("\\").strip()
+
+
+def chunk_texts(texts, target=CHUNK_CHARS):
+    """Group lines into documents of about `target` characters, breaking between lines."""
+    buf, size = [], 0
+    for t in texts:
+        t = t.strip()
+        if not t:
+            continue
+        if size and size + len(t) + 1 > target:
+            yield "\n".join(buf)
+            buf, size = [], 0
+        buf.append(t)
+        size += len(t) + 1
+    if buf:
+        yield "\n".join(buf)
+
+
+_HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff]")
+
+
+def han_ratio(text):
+    return len(_HAN.findall(text)) / max(len(text), 1)
+
+
+def read_gz(path):
+    with gzip.open(path, "rt", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            yield line
+
+
+# ---- wikitext ------------------------------------------------------------------------------------
+_COMMENT = re.compile(r"<!--.*?-->", re.S)
+_REF = re.compile(r"<ref[^>]*?/>|<ref[^>]*?>.*?</ref>|<references\s*/>", re.S | re.I)
+# `[[File:…]]` / `[[Category:…]]` are media and taxonomy, not prose; the doc keeps the body text only.
+_MEDIA = re.compile(r"\[\[(?:File|Image|文件|图像|图片|Category|分类)\s*:[^\[\]]*(?:\|.*?)?\]\]", re.S | re.I)
+_LINK = re.compile(r"\[\[[^\[\]|]*\|([^\[\]|]*)\]\]|\[\[([^\[\]|]*)\]\]")
+_EXT_LINK = re.compile(r"\[(?:https?|ftp)://[^\s\]]+\s*([^\]]*)\]")
+_HEADING = re.compile(r"^=+\s*(.*?)\s*=+$", re.M)
+_MAGIC = re.compile(r"__[A-Z]+__")
+_BREAK = re.compile(r"<br\s*/?>", re.I)
+_HTML = re.compile(r"</?[a-zA-Z][^>]*>")
+_EMPHASIS = re.compile(r"'{2,5}")
+_TABLE_ATTR = re.compile(r"^\s*[|!].*?\|", re.M)
+_BLANK = re.compile(r"\n{3,}")
+
+
+def _strip_balanced(text, open_s, close_s):
+    """Remove `open_s … close_s` spans, counting nesting (templates and tables both nest)."""
+    out, depth, i, n = [], 0, 0, len(text)
+    while i < n:
+        if text.startswith(open_s, i):
+            depth += 1
+            i += len(open_s)
+            continue
+        if text.startswith(close_s, i):
+            depth = max(0, depth - 1)
+            i += len(close_s)
+            continue
+        if not depth:
+            out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+def strip_wikitext(text):
+    """Reduce a raw wiki page to its readable prose (see doc/datasets.md 1.5)."""
+    text = _COMMENT.sub("", text)
+    text = _REF.sub("", text)
+    text = _strip_balanced(text, "{|", "|}")
+    text = _strip_balanced(text, "{{", "}}")
+    text = _MEDIA.sub("", text)
+    text = _LINK.sub(lambda m: m.group(1) or m.group(2) or "", text)
+    text = _EXT_LINK.sub(lambda m: m.group(1), text)
+    text = _BREAK.sub("\n", text)
+    text = _HEADING.sub(lambda m: m.group(1), text)
+    text = _MAGIC.sub("", text)
+    text = _HTML.sub("", text)
+    text = _TABLE_ATTR.sub("", text)
+    text = _EMPHASIS.sub("", text)
+    text = _BLANK.sub("\n\n", text)
+    return "\n".join(ln.strip() for ln in text.splitlines() if ln.strip())
+
+
+# ---- English small-set noise ---------------------------------------------------------------------
+def clean_daily_dialog(turns):
+    """DailyDialog ships its punctuation separated by a space (`after dinner ?`)."""
+    return "\n".join(re.sub(r"\s+([?.!,;:])", r"\1", t).strip() for t in turns if t and t.strip())
+
+
+def clean_empathetic(prompt, utterance):
+    """EmpatheticDialogues escapes commas inside its prompts as `_comma_`."""
+    return "\n".join(t.replace("_comma_", ",").strip() for t in (prompt, utterance) if t)
+
+
+_TOPICAL_TURN = re.compile(r"</s>\s*<s>\s*\[agent_\d+\]|<s>\s*\[agent_\d+\]|</?s>|\[agent_\d+\]")
+
+
+def clean_topical(conversation):
+    """Topical-Chat wraps every turn in `<s>[agent_1]…</s>` markers."""
+    return _TOPICAL_TURN.sub("\n", conversation or "").strip()
+
+
+_CORNELL_SPEAKER = re.compile(r"^\s*[A-Z][A-Z0-9'.\- ]{0,30}?\s{2,}")
+
+
+def clean_cornell(text):
+    """Cornell rows are one line each, prefixed with the character name (`BIANCA   They do not!`)."""
+    return _CORNELL_SPEAKER.sub("", (text or "").replace("\r", "")).strip()
+
+
+# ------------------------------------------------------------------------------------------------
+# b-corpus (.txt.gz) and ChatHaruhi
+# ------------------------------------------------------------------------------------------------
+def _bcorpus_paths(root, patterns):
+    base = os.path.join(root, BCORPUS)
+    paths = []
+    for pat in patterns:
+        paths += glob.glob(os.path.join(base, pat), recursive=True)
+    return sorted({p for p in paths if p.endswith(".gz")})
+
+
+def _bcorpus(root, out, patterns):
+    written = 0
+    with Sink(out) as sink:
+        for path in _bcorpus_paths(root, patterns):
+            for doc in chunk_texts(clean_line(ln) for ln in read_gz(path)):
+                sink.write(doc)
+            written += 1
+    return sink.docs, sink.chars, f"{written} files"
+
+
+@job("bcorpus_zh", "chat/bcorpus_zh.jsonl", ["Limour--b-corpus/v-corpus-zh/**/*.txt.gz"])
+def bcorpus_zh(root, out):
+    return _bcorpus(root, out, ["v-corpus-zh/**/*.txt.gz"])
+
+
+@job("bcorpus_en", "en_chat/bcorpus_en.jsonl", ["Limour--b-corpus/v-corpus-en/*.txt.gz"])
+def bcorpus_en(root, out):
+    return _bcorpus(root, out, ["v-corpus-en/*.txt.gz"])
+
+
+@job("bcorpus_fiction", "fiction/bcorpus_fiction.jsonl",
+     ["Limour--b-corpus/近现代小说/**/*.txt.gz", "Limour--b-corpus/翻译名著/**/*.txt.gz",
+      "Limour--b-corpus/轻小说/**/*.txt.gz"])
+def bcorpus_fiction(root, out):
+    return _bcorpus(root, out, ["近现代小说/**/*.txt.gz", "翻译名著/**/*.txt.gz", "轻小说/**/*.txt.gz"])
+
+
+@job("bcorpus_long", "long/bcorpus_long.jsonl",
+     ["Limour--b-corpus/提高逼格/**/*.txt.gz", "Limour--b-corpus/畅销书/**/*.txt.gz",
+      "Limour--b-corpus/散文集/**/*.txt.gz", "Limour--b-corpus/古籍/**/*.txt.gz"])
+def bcorpus_long(root, out):
+    return _bcorpus(root, out, ["提高逼格/**/*.txt.gz", "畅销书/**/*.txt.gz", "散文集/**/*.txt.gz",
+                                "古籍/**/*.txt.gz"])
+
+
+@job("bcorpus_roleplay", "roleplay/bcorpus_roleplay.jsonl", ["Limour--b-corpus/q-corpus/*.txt.gz"])
+def bcorpus_roleplay(root, out):
+    return _bcorpus(root, out, ["q-corpus/*.txt.gz"])
+
+
+@job("kajiwoto", "en_chat/kajiwoto.jsonl", ["Limour--b-corpus/emoji/kajiwoto.txt.gz"])
+def kajiwoto(root, out):
+    """The `user：`/`gpt：` chat log, one line per turn (see doc/datasets.md 1.2)."""
+    path = os.path.join(root, BCORPUS, "emoji", "kajiwoto.txt.gz")
+    with Sink(out) as sink:
+        for doc in chunk_texts(clean_line(ln) for ln in read_gz(path)):
+            sink.write(doc)
+    return sink.docs, sink.chars, "1 file"
+
+
+@job("chat_haruhi", "roleplay_char/chat_haruhi.jsonl",
+     ["Limour--b-corpus/ChatHaruhi/RolePlaying/*.txt.gz", "Limour--b-corpus/ChatHaruhi/Waifu/*.txt.gz"])
+def chat_haruhi(root, out):
+    """Per-character files; the leading `system：` line is dropped and the file is routed by its Han ratio."""
+    base = os.path.join(root, BCORPUS, "ChatHaruhi")
+    files = sorted(glob.glob(os.path.join(base, "*", "*.txt.gz")))
+    out_dir = os.path.dirname(out)
+    zh_path = os.path.join(out_dir, "chat_haruhi_zh.jsonl")
+    en_path = os.path.join(out_dir, "chat_haruhi_en.jsonl")
+    n_zh = n_en = 0
+    with Sink(zh_path) as zh, Sink(en_path) as en:
+        for path in files:
+            lines = [ln for ln in read_gz(path) if ln.strip()]
+            if not lines:
+                continue
+            body = lines[1:] if lines[0].lstrip().startswith(("system：", "system:")) else lines
+            zh_side = han_ratio("".join(body)) >= 0.1
+            sink = zh if zh_side else en
+            for doc in chunk_texts(clean_line(ln) for ln in body):
+                sink.write(doc)
+            n_zh += zh_side
+            n_en += not zh_side
+    return zh.docs + en.docs, zh.chars + en.chars, f"{n_zh} zh / {n_en} en files"
+
+
+# ------------------------------------------------------------------------------------------------
+# JSON arrays
+# ------------------------------------------------------------------------------------------------
+@job("looksjuicy", "roleplay/looksjuicy.jsonl",
+     ["LooksJuicy--Chinese-Roleplay-SingleTurn/Roleplay_Anime_xhj_alpaca.json"])
+def looksjuicy(root, out):
+    """`instruction` becomes `system_prompt`, or the character card is repeated in every user turn.
+
+    The record keeps both spellings of the content: pretraining reads `text`, SFT reads the
+    `system_prompt`/`input`/`output` fields through normalize_messages (doc/datasets.md 1.6)."""
+    path = os.path.join(root, "LooksJuicy--Chinese-Roleplay-SingleTurn", "Roleplay_Anime_xhj_alpaca.json")
+    with open(path, encoding="utf-8") as f:
+        records = json.load(f)
+    with Sink(out, records=True) as sink:
+        for rec in records:
+            card, user, reply = rec.get("instruction", ""), rec.get("input", ""), rec.get("output", "")
+            sink.write_record({"text": "\n".join(x for x in (card, user, reply) if x),
+                               "system_prompt": card, "input": user, "output": reply})
+    return sink.docs, sink.chars, "json array"
+
+
+_THINK = re.compile(r"<think(?:ing)?>.*?</think(?:ing)?>", re.S | re.I)
+_CAT_GIRL_FILES = ("v2/common-v2.json", "v2/create-v2.json", "v2/create-v2-next-nothink.json")
+
+
+@job("catgirl", "roleplay_catgirl/catgirl.jsonl",
+     ["kxdw2580--catgirl-dataset/v2/common-v2.json", "kxdw2580--catgirl-dataset/v2/create-v2.json",
+      "kxdw2580--catgirl-dataset/v2/create-v2-next-nothink.json"])
+def catgirl(root, out):
+    """v2 only (the author rules out v1 and the qwen3 series); the inline chain of thought is dropped."""
+    base = os.path.join(root, "kxdw2580--catgirl-dataset")
+    with Sink(out, records=True) as sink:
+        for rel in _CAT_GIRL_FILES:
+            with open(os.path.join(base, rel), encoding="utf-8") as f:
+                records = json.load(f)
+            for rec in records:
+                inst, user = rec.get("instruction", ""), rec.get("input", "")
+                reply = _THINK.sub("", rec.get("output", "")).strip()
+                # Alpaca shape: the question lives in `instruction`, `input` only carries extra context.
+                sink.write_record({"text": "\n".join(x for x in (inst, user, reply) if x),
+                                   "instruction": inst, "input": user, "output": reply})
+    return sink.docs, sink.chars, f"{len(_CAT_GIRL_FILES)} files"
+
+
+# ------------------------------------------------------------------------------------------------
+# wiki and the English small sets (parquet / jsonl inputs)
+# ------------------------------------------------------------------------------------------------
+def _parquet_rows(path, columns):
+    import pyarrow.parquet as pq
+
+    for batch in pq.ParquetFile(path).iter_batches(columns=columns, batch_size=4096):
+        yield from batch.to_pylist()
+
+
+@job("moegirl", "wiki/moegirl.jsonl",
+     ["mrzjy--chinese_moegirl_wiki_corpus_raw/default/train/*.parquet"])
+def moegirl(root, out):
+    """Raw wikitext in, prose out: 99.6% of the pages carry `[[`, 91.5% `{{` (doc/datasets.md 1.5)."""
+    files = sorted(glob.glob(os.path.join(root, "mrzjy--chinese_moegirl_wiki_corpus_raw",
+                                          "default", "train", "*.parquet")))
+    with Sink(out) as sink:
+        for path in files:
+            for rec in _parquet_rows(path, ["text"]):
+                sink.write(strip_wikitext(rec.get("text") or ""))
+    return sink.docs, sink.chars, f"{len(files)} shards"
+
+
+@job("daily_dialog", "en_chat/daily_dialog.jsonl",
+     ["li2017dailydialog--daily_dialog/default/train/*.parquet"])
+def daily_dialog(root, out):
+    files = sorted(glob.glob(os.path.join(root, "li2017dailydialog--daily_dialog", "default", "train",
+                                          "*.parquet")))
+    with Sink(out) as sink:
+        for path in files:
+            for rec in _parquet_rows(path, ["dialog"]):
+                sink.write(clean_daily_dialog(rec.get("dialog") or []))
+    return sink.docs, sink.chars, f"{len(files)} shards"
+
+
+@job("empathetic", "en_chat/empathetic.jsonl",
+     ["facebook--empathetic_dialogues/default/train/*.parquet"])
+def empathetic(root, out):
+    files = sorted(glob.glob(os.path.join(root, "facebook--empathetic_dialogues", "default", "train",
+                                          "*.parquet")))
+    with Sink(out) as sink:
+        for path in files:
+            for rec in _parquet_rows(path, ["prompt", "utterance"]):
+                sink.write(clean_empathetic(rec.get("prompt"), rec.get("utterance")))
+    return sink.docs, sink.chars, f"{len(files)} shards"
+
+
+@job("topical_chat", "en_chat/topical_chat.jsonl", ["Fishball02--topical-chat/data/train-*.parquet"])
+def topical_chat(root, out):
+    files = sorted(glob.glob(os.path.join(root, "Fishball02--topical-chat", "data", "train-*.parquet")))
+    with Sink(out) as sink:
+        for path in files:
+            for rec in _parquet_rows(path, ["conversation"]):
+                sink.write(clean_topical(rec.get("conversation")))
+    return sink.docs, sink.chars, f"{len(files)} shards"
+
+
+@job("cornell", "en_chat/cornell.jsonl",
+     ["mylesmharrison--cornell-movie-dialog/default/train/*.parquet"])
+def cornell(root, out):
+    """One line per utterance in the source, so consecutive lines are grouped back into exchanges."""
+    files = sorted(glob.glob(os.path.join(root, "mylesmharrison--cornell-movie-dialog", "default",
+                                          "train", "*.parquet")))
+    with Sink(out) as sink:
+        for path in files:
+            lines = (clean_cornell(rec.get("text")) for rec in _parquet_rows(path, ["text"]))
+            for doc in chunk_texts(lines):
+                sink.write(doc)
+    return sink.docs, sink.chars, f"{len(files)} shards"
+
+
+@job("esconv", "en_chat/esconv.jsonl", ["thu-coai--esconv/ESConv.jsonl"])
+def esconv(root, out):
+    path = os.path.join(root, "thu-coai--esconv", "ESConv.jsonl")
+    with Sink(out) as sink, open(path, encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            rec = json.loads(line)
+            sink.write("\n".join(t.get("content", "").strip() for t in rec.get("dialog") or []))
+    return sink.docs, sink.chars, "1 file"
+
+
+# ------------------------------------------------------------------------------------------------
+# SFT slices
+# ------------------------------------------------------------------------------------------------
+def _spool_messages(out, specs):
+    """Write the `{"messages": [...]}` shape ChatDataset reads, one record per usable source record.
+
+    `--mm_data` accepts source specs directly, but the recipe's 74 / 21 / 5 slice is three items, so the
+    two group files are written once here.  Running every record through normalize_messages also reports
+    how many are unusable (`assistant` roles, instruction-only rows) before a training run starts."""
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+    from common_io import iter_records
+    from hvlm.data_core import normalize_messages
+
+    bad = 0
+    with Sink(out, records=True) as sink:
+        for spec in specs:
+            for rec in iter_records(spec):
+                try:
+                    msgs = normalize_messages(dict(rec))
+                    if not any(m["role"] == "self" for m in msgs):
+                        raise ValueError("no 'self' turn")
+                except Exception:
+                    bad += 1
+                    continue
+                sink.write_record({"messages": msgs})
+    return sink.docs, sink.chars, f"{len(specs)} sources, {bad} unusable"
+
+
+@job("sft_human_dialog", "sft/human_dialog.jsonl", ["silver--lccc/base/train/*.parquet"])
+def sft_human_dialog(root, out):
+    """Human-to-human chat for SFT: LCCC base, the same source the pretraining chat bin reads first."""
+    return _spool_messages(out, [f"parquet:{root}/silver--lccc/base/train/*.parquet:dialog"])
+
+
+@job("sft_persona", "sft/persona.jsonl",
+     ["shibing624--roleplay-zh/sharegpt_formatted_data-evol-gpt4.jsonl",
+      "Johnson8187--role-play-chinese/alpaca_format_simplified.jsonl"])
+def sft_persona(root, out):
+    """Persona multi-turn sets; the third source is the `looksjuicy` job's output, so run that first."""
+    return _spool_messages(out, [
+        f"jsonl:{root}/shibing624--roleplay-zh/sharegpt_formatted_data-evol-gpt4.jsonl:-",
+        f"jsonl:{root}/Johnson8187--role-play-chinese/alpaca_format_simplified.jsonl:-",
+        "jsonl:data/roleplay/looksjuicy.jsonl:-",
+    ])
+
+
+# ------------------------------------------------------------------------------------------------
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--snapshot", default=DEFAULT_SNAPSHOT,
+                    help=f"directory holding the hf/<org>--<name>/ snapshots (default {DEFAULT_SNAPSHOT})")
+    ap.add_argument("--out", default="data", help="bucket root the job outputs land in (default data)")
+    ap.add_argument("--only", nargs="+", metavar="JOB", help="run a subset of the jobs")
+    ap.add_argument("--force", action="store_true", help="redo outputs that already exist")
+    ap.add_argument("--list", action="store_true", help="print the jobs and exit")
+    args = ap.parse_args()
+
+    if args.list:
+        for name, spec in JOBS.items():
+            print(f"{name:16s} -> {spec['out']}")
+            for src in spec["sources"]:
+                print(f"{'':16s}    {src}")
+        return
+    names = args.only or list(JOBS)
+    unknown = [n for n in names if n not in JOBS]
+    if unknown:
+        raise SystemExit(f"unknown job(s) {unknown}; --list shows the choices")
+    if not os.path.isdir(args.snapshot):
+        raise SystemExit(f"snapshot directory not found: {args.snapshot!r} (--snapshot points at it)")
+
+    failed = []
+    for name in names:
+        spec = JOBS[name]
+        out = os.path.join(args.out, spec["out"])
+        if os.path.exists(out) and not args.force:
+            print(f"[skip] {name}: {out} exists (--force to redo)")
+            continue
+        try:
+            docs, chars, note = spec["fn"](args.snapshot, out)
+        except FileNotFoundError as e:
+            failed.append(name)
+            print(f"[FAIL] {name}: {e}", file=sys.stderr)
+            continue
+        print(f"[ok]   {name}: {docs} documents, {chars / 1e6:.1f}M chars -> {out} ({note})")
+    if failed:
+        raise SystemExit(f"{len(failed)} job(s) failed: {failed}")
+    print("all jobs done; run_pipeline.sh reads these through its data/<bucket>/*.jsonl globs")
+
+
+if __name__ == "__main__":
+    main()

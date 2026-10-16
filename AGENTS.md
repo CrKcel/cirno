@@ -9,16 +9,20 @@ in Python/PyTorch, positioned as an **on-device chat / role-play model** rather 
   `gated_delta.py` the delta rule and kernel dispatch; `configuration_hvlm.py` the configs;
   `monitor.py` the training-health policy and the metric/event streams.
   `positions.py`, `data_core.py` and `monitor.py` are numpy-only and must stay importable without torch.
-- `scripts/` — CLI entry points: `train_tokenizer.py`, `prepare_data.py`, `train.py`, `sample.py`,
-  plus the `smoke_test.sh` and `run_pipeline.sh` orchestration scripts.
+- `scripts/` — CLI entry points: `train_tokenizer.py`, `prepare_data.py`, `prepare_local_data.py`
+  (turns the local dataset snapshot into the `data/<bucket>/*.jsonl` the recipe reads), `train.py`,
+  `sample.py`, plus the `smoke_test.sh` and `run_pipeline.sh` orchestration scripts.
 - `tools/` — standalone estimators and checks: `estimate.py`, `measure_batch.py`,
-  `check_algorithms_numpy.py`, `check_data_numpy.py`, `check_monitor.py`, `make_synthetic.py`,
-  `plan_mix.py` (resolves `configs/pretrain_plan.json` against the bins' `meta.json` into the runnable
+  `check_algorithms_numpy.py`, `check_data_numpy.py`, `check_local_data.py`, `check_monitor.py`,
+  `make_synthetic.py`, `plan_mix.py` (resolves `configs/pretrain_plan.json` against the bins' `meta.json` into the runnable
   `plan.resolved.json`), `watch_training.py` (terminal dashboard over the metric streams).
 - `tests/` — `test_model.py`, the torch test suite.
 - `configs/` — `hvlm_130m.json` model config and `pretrain_plan.json`, the training recipe (phase
   budgets, shapes, per-bin token allocations, mixture targets). `data/` and `runs/` hold generated
   artifacts and are gitignored.
+- Training data is the local Hugging Face snapshot (`CIRNO_SNAPSHOT`, default `/mnt/data/LLM/hf`, one
+  directory per repo); `run_pipeline.sh` exports the `*_OFFLINE` switches, so a residual `hf:` spec fails
+  instead of downloading. `doc/datasets.md` maps every dataset to its snapshot path.
 - `doc/` — the long-form docs: `architecture.md` (model design, parameter count, memory and
   throughput, precision/kernel choices), `training.md` (design positioning, the three training
   stages, data prep, evaluation, edge inference, training flags), `datasets.md` (which open datasets
@@ -37,6 +41,7 @@ pip install flash-linear-attention          # optional CUDA Triton kernels for G
 python tools/check_algorithms_numpy.py      # chunked delta rule vs recurrence, M-RoPE (no torch)
 python tools/check_data_numpy.py            # data pipeline (no torch)
 python tools/check_monitor.py               # health policy, metric streams, dashboard, recipe (no torch)
+python tools/check_local_data.py            # offline data path: cleaners, snapshot inputs, recipe wiring
 python tools/estimate.py configs/hvlm_130m.json
 python tools/plan_mix.py --plan configs/pretrain_plan.json   # resolve the recipe against the bins' meta.json
 python tests/test_model.py                  # torch suite
@@ -55,8 +60,10 @@ memory/throughput trade-offs.
 
 ```bash
 # tokenizer -> per-source token bins -> pretrain (three phases) -> (optional) align -> sft -> sample
-python scripts/train_tokenizer.py --out tokenizer --desegment --source "jsonl:data/chat/*.jsonl:text@3200000"
-python scripts/prepare_data.py --tokenizer tokenizer --desegment --source "jsonl:data/chat/*.jsonl:text" --out data/bin/chat --max_tokens 1014000000 --val_tokens 4000000
+export CIRNO_SNAPSHOT=/mnt/data/LLM/hf      # local snapshot; every source is a path inside it
+python scripts/prepare_local_data.py --snapshot "$CIRNO_SNAPSHOT" --out data   # cleaning -> data/<bucket>/*.jsonl
+python scripts/train_tokenizer.py --out tokenizer --desegment --source "jsonl:data/chat/*.jsonl:text@8000"
+python scripts/prepare_data.py --tokenizer tokenizer --desegment --source "parquet:$CIRNO_SNAPSHOT/silver--lccc/base/train/*.parquet:dialog" --source "jsonl:data/chat/*.jsonl:text" --out data/bin/chat --max_tokens 1210000000 --val_tokens 4000000
 # the recipe declares each phase's budget, shape and mixture; plan_mix.py fills in the weights from the
 # bins' meta.json and writes runs/pretrain/plan.resolved.json, which every phase then executes
 python tools/plan_mix.py --plan configs/pretrain_plan.json --write runs/pretrain/plan.resolved.json --print-commands
@@ -73,15 +80,15 @@ python scripts/train.py --stage align --plan runs/pretrain/plan.resolved.json --
 python scripts/train.py --stage sft --plan runs/pretrain/plan.resolved.json --phase sft \
     --tokenizer tokenizer --init_from runs/align/final --out_dir runs/sft \
     --mm_data data/sft/human_dialog.jsonl,data/sft/persona.jsonl,data/sft/refuse.jsonl \
-    --mm_weights 0.74,0.21,0.05 --resume
+    --mm_weights 0.74,0.21,0.05 --desegment --resume
 python scripts/sample.py --model runs/sft/final --prompt "在吗" --max_new_tokens 32
 ```
 
 To skip the vision stage (text-only chat), drop the `align` line and use
 `--init_from runs/pretrain/final --train llm` for `sft` with pure-text data.
 
-`bash scripts/run_pipeline.sh` runs the same recipe end to end; edit its DATA section for real
-corpora. Each stage writes `out_dir/last` (weights + optimizer + GradScaler state, used by
+`bash scripts/run_pipeline.sh` runs the same recipe end to end against the snapshot (set
+`CIRNO_SNAPSHOT` if it lives elsewhere). Each stage writes `out_dir/last` (weights + optimizer + GradScaler state, used by
 `--resume`) and `out_dir/final` (weights + tokenizer, used by the next stage's `--init_from`).
 
 Useful flags beyond the per-stage defaults: `--compile` for speed, `--seq_len / --micro_batch /
@@ -95,8 +102,8 @@ token budget); `--mm_weights` sets the align/SFT source mixture. Monitoring swit
 
 ## Verification
 
-1. `tools/check_algorithms_numpy.py`, `tools/check_data_numpy.py`, `tools/check_monitor.py`,
-   `tools/estimate.py` — no torch needed; all pass in the sandbox.
+1. `tools/check_algorithms_numpy.py`, `tools/check_data_numpy.py`, `tools/check_local_data.py`,
+   `tools/check_monitor.py`, `tools/estimate.py` — no torch needed; all pass in the sandbox.
 2. `tests/test_model.py` — 26 tests, ~19 s on the RTX 4060 Laptop (GPU paths included). Coverage:
    chunked delta rule ≡ recurrence (forward and gradients), parameter count matches the estimator,
    causality (including images), right padding is inert, MTP label alignment, chunked CE ≡ full CE

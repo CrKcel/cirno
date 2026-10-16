@@ -48,15 +48,15 @@
   | 英文对话 | — | 25.1% | 3.0% | 810M | 810M | 810M | 1.00 遍 |
   | 小说 / 网文 / 剧本对白 | 45% | 24.4% | 27.0% | 1.593B | 1.593B | 1.593B | 1.00 遍 |
   | 长文 / 非对话文本 | 35% | 2.3% | 3.0% | 527M | 527M | 527M | 1.00 遍 |
-  | 通识 / 百科 / 常识 | 20% | 23.5% | 23.5% | 1.225B | 1.425B | 1.225B | **0.86 遍** |
+  | 通识 / 百科 / 常识 | 20% | 23.5% | 23.5% | 1.225B | ≈1.39B | 1.225B | **0.88 遍** |
   | 角色扮演（persona 卡片 / 小说角色 / 猫娘） | — | — | 2.1% | 22.5M | 22.5M | 22.5M | 1.00 遍 |
 
   池子的构成（估算与取法见 [datasets.md §1](datasets.md)）：`Limour/b-corpus` 的正文类目录已全部归入各桶
   （chat +130M、en_chat +52M、fiction +163M、long +21M、roleplay +2.2M、roleplay_char +1.6M），英文桶另加
   `noanabeshima/TinyStoriesV2`（+≈550M），fiction / wiki / roleplay 再收 `Miaowuawa/ChineseNovels`（截断后
-  ≈254M）、`mrzjy/chinese_moegirl_wiki_corpus_raw`（清洗后 ≈82M）、`LooksJuicy/Chinese-Roleplay-SingleTurn`
-  （≈3.3M）。后三份是抽样外推（±20%）：落盘后按 `prepare_data` 的 `train_tokens` 重跑一次 `tools/plan_mix.py`，
-  `expected_tokens` / `allocate` 跟着实测值走。
+  ≈254M）、`mrzjy/chinese_moegirl_wiki_corpus_raw`（清洗后 72.1M 字符 ≈ 50M）、
+  `LooksJuicy/Chinese-Roleplay-SingleTurn`（≈3.3M）。这些数字是抽样外推（±20%）：按 `prepare_data` 输出的
+  `train_tokens` 重跑一次 `tools/plan_mix.py`，`expected_tokens` / `allocate` 跟着实测值走。
 
   每段的理由：
 
@@ -73,9 +73,10 @@
   - **chat 读 1.20 遍**（1.212B / 1.010B）。对话是这个定位唯一的目标分布，而公开中文人类闲聊只有 1.01B；
     多出的 202M 全部落在退火段（C 段 chat 占 41.4%），是给最后一段梯度做分布温度，而不是全程均匀重放。
     会话级语料重复第二遍的边际收益低于"最后怎么说话"，这也是它能排在百科尾部前面的原因。
-  - **wiki 读 0.86 遍**（1.225B / 1.425B）。`baidu-baike` 的顺序是常见词 → 冷门实体，截掉的 200M 正好是长尾；
-    116.65M 参数本来也存不下它们，超过容量后不同事实互相干扰，反而压低已记住那些的召回。`prepare_data`
-    的 `--max_tokens` 因此按 allocate 给（1228050000 + val），少下 ~1.2 GB、少 tokenize 200M。
+  - **wiki 读 0.88 遍**（1.225B / ≈1.39B）。`baidu-baike` 的顺序是常见词 → 冷门实体，截掉的 ≈165M 正好是
+    长尾；116.65M 参数本来也存不下它们，超过容量后不同事实互相干扰，反而压低已记住那些的召回。
+    `prepare_data` 的 `--max_tokens` 因此按 allocate 给（1228050000 + val），少 tokenize 165M；量小的萌娘百科
+    排在这个 cap 之前读，不会被百度百科吃满。
 
   全程对话 **37.5%**（chat 22.5% + 英文 15.0%），非对话 62.5%（小说 29.6% + 长文 9.8% + 通识 22.7% + 角色扮演 0.4%）：
 - **规模**：5.39B token ÷ 116.65M 参数 = **46.2 token/参数**，约为 Chinchilla 参照（2.7B）的 2 倍。
@@ -91,7 +92,7 @@
   `互动小说`（同人、未清洗，≈149M token）与 `近现代小说`/`翻译名著`/`轻小说`（≈14M，出版作品、授权链
   不清），`Miaowuawa/ChineseNovels` 补 ≈254M（整本一篇，不拆章只进每本前 200k 字符），池子 ≈1.59B。
 - **通识：瓶颈在参数量**。知识桶 allocate 1.225B token（22.7%）：百度百科 parquet 分支实测 1.73M 条 /
-  1.92B 字符 ≈ **1.34B token**（按常见实体优先读，尾部不读），萌娘百科清洗后 ≈82M。
+  1.92B 字符 ≈ **1.34B token**（按常见实体优先读，尾部不读），萌娘百科清洗后 72.1M 字符 ≈ 50M。
   **"通识内容会不会太少"的答案不在数据侧**：
   116.65M 参数能存下的事实本来就有限，超过容量后不同事实还会互相干扰（同一批权重塞进更多事实，
   反而压低已记住那些的召回）。按性价比排序，真正能改善通识的四件事：
@@ -105,7 +106,9 @@
      口语、不确定就说不知道），不是预训练再加几百 M token 能解决的。
 - **清洗**：分词型语料必须去空格——`silver/lccc` 的 `dialog` 直接用会让模型学着在汉字之间输出空格，
   tokenize 时加 `--desegment`（原理与三个入口见 §5）。字幕集的 `.ass` 标记同样是重灾区，不清洗会把字幕桶
-  绝大部分 token 预算花在 `[Script Info]`、样式和时间轴上（实测比例与清洗步骤见 progress.md TODO）。
+  绝大部分 token 预算花在 `[Script Info]`、样式和时间轴上（清洗产物已在快照里，见 progress.md TODO）。
+  其余文本层清洗——b-corpus 的 `.txt.gz`、萌娘百科原始 wikitext、JSON 数组角色扮演集、英文小集的
+  标点/标记噪声——统一由 `scripts/prepare_local_data.py` 落成 `data/<bucket>/*.jsonl`。
 - **语料盘点**：字符→token 按 0.7 tok/char（中文）/ 0.25（英文）估算（32k BPE、中文为主，±20%），
   真实值以 `prepare_data` 输出的 `train_tokens` 为准；下表是本地快照的实测字符数与由此得到的池子。
 
@@ -115,12 +118,12 @@
   | en_chat | 810M（soda 191M + 真人小集 17M + b-corpus 52M + TinyStoriesV2 550M） | 810M | 1.00 遍 |
   | fiction（网文） | 1.593B（webnovel 1.176B + 互动小说 149M + 近现代/翻译/轻小说 14M + ChineseNovels 254M） | 1.593B | 1.00 遍 |
   | long | 527M（知乎 506M + b-corpus 21M） | 527M | 1.00 遍 |
-  | wiki | 1.425B（百度百科 1.343B + 萌娘百科 ≈82M） | 1.225B | **0.86 遍** |
+  | wiki | ≈1.39B（百度百科 1.343B + 萌娘百科 ≈50M，72.1M 字符实测） | 1.225B | **0.88 遍** |
   | roleplay（persona 卡片） | 17.2M（shibing624 1.5M + Johnson8187 10.3M + `q-corpus` 2.2M + LooksJuicy 3.3M） | 17.2M | 1.00 遍 |
   | roleplay_char（小说角色） | 5.1M（ChatHaruhi 对白 3.5M + b-corpus 1.6M） | 5.1M | 1.00 遍 |
   | roleplay_catgirl（猫娘） | 0.15M（kxdw2580 v2，去掉 `<think>` 后） | 0.15M | 1.00 遍 |
 
-  合计：**预算 5.39B = allocate 之和**；唯一被重复的是 chat（+202M），唯一没读完的是 wiki（−200M）。
+  合计：**预算 5.39B = allocate 之和**；唯一被重复的是 chat（+202M），唯一没读完的是 wiki（−165M）。
 - **序列**：阶段 A 用 **2048** 训长文，B / C 用 1024（IM 对话天然短）。把多个会话拼进同一条序列时仍用
   `<|endoftext|>` 分隔，并尽量让一条序列 = 一个完整会话，模型才能看到会话边界。2048 不需要位置缩放
   （`max_position_embeddings=4096`、`rope_theta=1e6`），代价也几乎为零：8 GB 卡上 seq 2048 × mb 2 与
@@ -200,68 +203,49 @@
 
 ## 5. 数据准备
 
-```bash
-# 0. tokenizer：32k BPE。四件事必须一次做对，因为重做它等于重做所有桶：
-#    · 每个占有实际 token 份额的桶都要出现（漏了 fiction 会让近三成的语料被拆成字节）；
-#    · `@N` 是**每个源各自的预算**，要按"平均文档长度"定而不是凭感觉——一条闲聊 ~35 字、一篇条目
-#      ~2800 字，所以看起来相等的 N 会把目标分布饿死。下面这组按 §2 的全程 token 总量配，
-#      约为 对话 19% / 网文 30% / 通识 26% / 长文 10% / 英文 15%；
-#    · 分词型语料（LCCC）必须加 --desegment，否则学到的是带空格文本的 merge；
-#    · 数字整段保留（`\p{N}+`），不学 Qwen2 的逐位切分（那是为算术准备的，本项目不做数学）。
-python scripts/train_tokenizer.py --out tokenizer --desegment \
-    --source "jsonl:data/chat/*.jsonl:text@2700000" --source "jsonl:data/en_chat/*.jsonl:text@350000" \
-    --source "jsonl:data/fiction/*.jsonl:text@40000" --source "jsonl:data/wiki/*.jsonl:text@34000" \
-    --source "jsonl:data/long/*.jsonl:text@85000"
+数据全部来自本地快照（`CIRNO_SNAPSHOT`，默认 `/mnt/data/LLM/hf`；每个仓库一个目录、保留 Hub 的文件
+布局），所以整条流水线不需要联网。下面的命令与 [run_pipeline.sh](../scripts/run_pipeline.sh) 的前四步
+等价，完整清单以脚本为准——桶内的源、顺序、cap 与理由都在它的 DATA 段，每个源的快照路径见
+[datasets.md](datasets.md) 的「取法」。
 
-# 1. 每个来源单独 tokenize，训练时再用权重混合，改配比不必重新 tokenize。
-#    §2 的桶都能直接在 HF 上取，列表型字段会自动拼成一篇文档，不需要先落地成本地 jsonl。
-#    LCCC 用转换后的 parquet 分支（写法见下），并加 --desegment 去掉分词空格。
-#    --max_tokens 是**安全上限**：放在该桶自己的池子之上，让源被读到结尾，`train_tokens` 就是各阶段
-#    共用的池子；卡在池子下面就是有语料没被训练，而不是"配比修正"——权重只从这些池子派生
-#    （tools/plan_mix.py），不会向任何一个桶要超过它自己的量。
-python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/chat --max_tokens 1020000000 --val_tokens 4000000 \
-    --source "parquet:hf://datasets/silver/lccc@refs/convert/parquet/base/train/*.parquet:dialog" \
-    --source "parquet:hf://datasets/silver/lccc@refs/convert/parquet/large/train/*.parquet:dialog" \
-    --source "jsonl:data/chat/subtitles.jsonl:text"                 # scripts/clean_ass.py --zh-only --t2s 的产物
-    # 字幕必须用清洗产物：原始 `data` 字段是整份 .ass，200k 字符/篇的截断后仍有大量卡拉OK 逐字行
-    # （见 progress.md TODO）。base 与 large 重叠约 30%，只在意唯一 token 时可以去掉 base。
-python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/en_chat --max_tokens 860000000 --val_tokens 1000000 \
-    --source "hf:noanabeshima/TinyStoriesV2:text:default:train"     # 排第一：cap 卡住时它优先，val.bin 也取自它
-    --source "hf:allenai/soda:dialogue:default:train"               # 合成数据，该桶第二大的一份
-    # 真人写的英文小集接在 soda 之后（各自带格式噪声，见 datasets.md §1.2）。cap 860M 是池子 ≈810M
-    # （TinyStoriesV2 550M + soda 191M + b-corpus 52M + 小集 17M）之上留的头寸，估偏了跑完
-    # tools/plan_mix.py 复核即可。桶内顺序不决定训练顺序（TokenMixer 对整桶窗口 shuffle），它只决定
-    # cap 优先级与 val 来源：cap 低于 TinyStoriesV2 自己的 550M 时后面的源一个 token 都进不来，
-    # 而 val.bin 取的是列表头的 1M token：
-    #   hf:ParlAI/blended_skill_talk:free_messages:default:train
-    #   hf:Fishball02/topical-chat:-:default:train
-    #   parquet:hf://datasets/li2017dailydialog/daily_dialog@refs/convert/parquet/default/train/*.parquet:dialog
-    #   parquet:hf://datasets/facebook/empathetic_dialogues@refs/convert/parquet/default/train/*.parquet:prompt+utterance
-python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/fiction --max_tokens 1610000000 --val_tokens 2500000 \
-    --source "hf:wdndev/webnovel-chinese:text:default:train"        # 网文 parquet 分支全量 ≈1.18B token
-    --source "hf:Miaowuawa/ChineseNovels:-:default:train"           # 一整本一篇，截断后 ≈0.25B token
-    # 中位 22.3 万字符/本、56% 超过 --max_doc_chars 默认 200000：不拆章每本只进前 20 万字符
-# 长文桶就是知乎的全部（0.72B 字符 ≈ 0.51B token，一遍）：
-python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/long --max_tokens 530000000 --val_tokens 2000000 \
-    --source "hf:wangrui6/Zhihu-KOL:RESPONSE:default:train"
-# wiki 的 cap 按配方的 allocate 给（1225.5M + val），不是池子：百度百科按常见词→冷门实体排序，尾部 200M 不读
-python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/wiki --max_tokens 1228050000 --val_tokens 2500000 \
-    --source "parquet:hf://datasets/lars1234/baidu-baike-dataset@refs/convert/parquet/default/partial-train/*.parquet:-"  # 简体白话百科 ≈1.34B token
-    --source "jsonl:data/wiki/*.jsonl:text"                         # 萌娘百科清洗产物，≈82M token
-# 萌娘百科（mrzjy/chinese_moegirl_wiki_corpus_raw）是原始 wikitext，要先剥模板/表格/注释再落成上面的
-# jsonl；291M 字符是清洗前的量，82M token 是抽样外推，落盘后按实测 train_tokens 复核 --max_tokens
-# roleplay 分三个桶 tokenize，权重按各自的 train_tokens 给，才能控制猫娘占比（见 §2）。
-# ChatHaruhi 只取 user_question+agent_response（对白占全文 51%）。
-python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/roleplay --max_tokens 18000000 --val_tokens 200000 \
-    --source "hf:shibing624/roleplay-zh-sharegpt-gpt4-data:-:sharegpt_formatted_data-evol-gpt4:train" \
-    --source "hf:Johnson8187/role-play-chinese:-:default:train" \
-    --source "hf:LooksJuicy/Chinese-Roleplay-SingleTurn:-:default:train"   # 单轮扮演，≈3.3M token
-python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/roleplay_char --max_tokens 5200000 --val_tokens 100000 \
-    --source "parquet:hf://datasets/silk-road/ChatHaruhi-54K-Role-Playing-Dialogue@refs/convert/parquet/default/train/*.parquet:user_question+agent_response"
-# 猫娘：kxdw2580/catgirl-dataset 是 gated、JSON 数组、回答内联 `<think>`，字段表达式清不掉思维链，
-# 要先落成本地 jsonl（去掉 `<think>` 与残留标签）再 tokenize（见 datasets.md §1.8）
-python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/roleplay_catgirl --max_tokens 180000 --val_tokens 20000 \
-    --source "jsonl:data/roleplay_catgirl/*.jsonl:text"
+```bash
+SNAP="${CIRNO_SNAPSHOT:-/mnt/data/LLM/hf}"
+export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 TRANSFORMERS_OFFLINE=1   # 残留的 hf: 立即报错，不会下载
+```
+
+```bash
+# 0a. 文本层清洗：b-corpus 的 .txt.gz、萌娘百科原始 wikitext、两个 JSON 数组角色扮演集、带标点/标记
+#     噪声的英文小集 -> data/<bucket>/*.jsonl；SFT 的两份切片（human_dialog / persona）也在这一步落盘。其余源直接在快照上按字段表达式读（`parquet:` 的 `a.b`
+#     能走进嵌套列表，例如互动小说的 `book_chapter.content.content`，正文之外的 content_tag/role 不进
+#     文档）。已存在的产物会跳过，--force 重做。
+python scripts/prepare_local_data.py --snapshot "$SNAP" --out data
+
+# 0b. tokenizer：32k BPE。四件事必须一次做对，因为重做它等于重做所有桶：
+#     · 每个占有实际 token 份额的桶都要出现（漏了 fiction 会让近三成的语料被拆成字节）；
+#     · `@N` 是**每个源各自的预算**，要按"平均文档长度"定而不是凭感觉——一条闲聊 ~80 字、一篇条目
+#       ~1000 字，看起来相等的 N 会把目标分布饿死。run_pipeline.sh 步骤 0 是完整清单：按 §2 的全程
+#       token 总量配成 对话 19% / 网文 30% / 通识 26% / 长文 10% / 英文 15%，重新推导用
+#       `python tools/check_local_data.py --lengths`（按源打印平均/中位文档长度）；
+#     · 分词型语料（LCCC）必须加 --desegment，否则学到的是带空格文本的 merge；
+#     · 数字整段保留（`\p{N}+`），不学 Qwen2 的逐位切分（那是为算术准备的，本项目不做数学）。
+python scripts/train_tokenizer.py --out tokenizer --desegment \
+    --source "parquet:$SNAP/silver--lccc/base/train/*.parquet:dialog@800000" \
+    --source "jsonl:data/wiki/*.jsonl:text@38000" \
+    --source "parquet:$SNAP/wangrui6--Zhihu-KOL/data/train-*.parquet:RESPONSE@160000"   # 其余见 run_pipeline.sh
+
+# 1. 每个桶单独 tokenize，训练时再用权重混合，改配比不必重新 tokenize。八个桶在 run_pipeline.sh 步骤 1，
+#    这里是 chat 桶的形状：
+#      · cap 是**安全上限**而不是预算：放在该桶池子之上，`train_tokens` 就是各阶段共用的池子；卡在池子
+#        下面就是有语料没被训练，而不是"配比修正"——权重只从这些池子派生（tools/plan_mix.py），不会向
+#        任何一个桶要超过它自己的量。唯一的例外是 wiki：cap 有意低于池子，只读百度百科的常见实体部分；
+#      · 顺序决定 cap 卡住时先读谁，以及 `val.bin` 取自谁：chat 的 val 来自 LCCC base，en_chat 的来自
+#        TinyStoriesV2（它因此排第一），wiki 把量小的萌娘百科排在百度百科前面，否则 cap 会被百度百科
+#        吃满、萌娘一个 token 都进不来。
+python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/chat --max_tokens 1210000000 --val_tokens 4000000 \
+    --source "parquet:$SNAP/silver--lccc/base/train/*.parquet:dialog" \
+    --source "parquet:$SNAP/silver--lccc/large/train/*.parquet:dialog" \
+    --source "jsonl:$SNAP/chenrm--anime-subtitles/dialogue.jsonl:text" \
+    --source "jsonl:data/chat/*.jsonl:text"
 
 # 2. 预训练：三段课程。先把配方解析成可执行文件，再按段跑：
 python tools/plan_mix.py --plan configs/pretrain_plan.json \
@@ -286,81 +270,47 @@ python scripts/train.py --stage align --plan runs/pretrain/plan.resolved.json --
 
 # 4. 对话 / 角色扮演 SFT：人类对话 + 人设 + 少量越界拒答
 #    跳过视觉对齐时：--init_from runs/pretrain/final --train llm（数据须为纯文本）
-#    --mm_weights 是配比旋钮：三项分别占 74% / 21% / 5%，不给就是"谁行数多谁说了算"
+#    --mm_weights 是配比旋钮：三项分别占 74% / 21% / 5%，不给就是"谁行数多谁说了算"。
+#    前两项由 prepare_local_data.py 从快照落盘（human_dialog = LCCC base，persona = shibing624 +
+#    Johnson8187 + LooksJuicy，后者的 instruction 已改名 system_prompt，否则整段人设会拼进 user 轮
+#    并在每轮重复，见 datasets.md §1.6）；refuse.jsonl 没有现成来源，按 §4.4 自己写。
 python scripts/train.py --stage sft --plan runs/pretrain/plan.resolved.json --phase sft \
     --tokenizer tokenizer --init_from runs/align/final --out_dir runs/sft \
     --mm_data data/sft/human_dialog.jsonl,data/sft/persona.jsonl,data/sft/refuse.jsonl \
     --mm_weights 0.74,0.21,0.05 --desegment --resume
-
-# 同一个 SFT 阶段也可以直接吃 HF 数据源，不用先落 jsonl：
-# LCCC 走转换后的 parquet 分支，并且要 --desegment：
-python scripts/train.py --stage sft --tokenizer tokenizer \
-    --init_from runs/pretrain/final --out_dir runs/sft --train llm --epochs 2 --lr 2e-4 --resume --desegment \
-    --mm_data "parquet:hf://datasets/silver/lccc@refs/convert/parquet/base/train/*.parquet:dialog,hf:shibing624/roleplay-zh-sharegpt-gpt4-data:-:sharegpt_formatted_data-evol-gpt4:train"
-# LooksJuicy/Chinese-Roleplay-SingleTurn 的单轮扮演也可进 SFT：落盘时把 instruction 改名 system_prompt
-# 再写 jsonl 给 --mm_data，否则整段人设会拼进 user 轮并在每轮重复（见 datasets.md §1.6）
 ```
 
-- `--source` 支持 `hf:`（流式 datasets）、`jsonl:`、`parquet:`、`txt:`，末尾 `@N` 限制文档数；字段按
-  `<数据集>:<字段>` 给出，`-` 表示整条记录，`a.b` 走嵌套路径，`a+b` 按顺序拼接（见 `scripts/common_io.py`
+- `--source` 支持 `parquet:`（本地 glob，字段可走 `a.b` 嵌套路径）、`jsonl:`、`txt:`，末尾 `@N` 限制文档数；
+  字段按 `<glob>:<字段>` 给出，`-` 表示整条记录，`a.b` 走嵌套路径，`a+b` 按顺序拼接（见 `scripts/common_io.py`
   的模块 docstring；[datasets.md §1](datasets.md) 给了每个集的现成写法）。列表型字段（LCCC 的
   `dialog`、SODA 的 `dialogue`）会自动用换行拼接成一篇文档，所以不需要先写转换脚本；没有字段名时可先用
   `-` 取整条记录。文档之间用 `<|endoftext|>` 分隔，产物是扁平 uint16 token 流 + `meta.json`。
-- `parquet:` 也接受远端 `hf://` glob，例如
-  `parquet:hf://datasets/silver/lccc@refs/convert/parquet/base/train/*.parquet:dialog`。这条写法有几种用途：
-  读只带加载脚本的集（LCCC / DailyDialog / EmpatheticDialogues 等，规则见 [datasets.md §0](datasets.md)
-  开头）、以及取某个不是 config 的子目录（分数档 `4_5/*.parquet`）。路径里的 `@refs/...`
-  是 revision，不是 `@N` 文档上限。
 - **`--desegment`**：去掉汉字之间的空格，给分词型语料用（`silver/lccc` 的 `dialog`、以及任何由它派生的
   SFT 数据）。`train_tokenizer.py` / `prepare_data.py` / `train.py`（align、sft 阶段）都有这个开关；
   它只删"一侧是 CJK"的空格，英文与数字之间的空格不受影响。
 - `--val_tokens` 会把前 N 个 token 切给 `val.bin`；训练时定期在验证集上打印 `loss` / `ppl`。对话模型的
   ppl 只能当作"没训崩"的 sanity check，选型看 §6。
-- `--mm_data` 用逗号分隔，每一项既可以是本地 jsonl 路径，也可以是 `hf:` / `parquet:` / `jsonl:<glob>`
-  这类来源；远程来源会先流式过一遍 `normalize_messages`，落到 `--mm_cache`（默认 `data/cache`，可复用）
-  的一个 jsonl 里再训练，这样 `Dataset` 仍按字节偏移随机读、`--resume` 精确，也不会把整个数据集塞进内存。
-  无法映射成 user/self 的记录（角色写成 `assistant`、只有一轮没有回复、字段认不出来）在落盘和读取时都会
-  被跳过。注意 `--mm_data` 里的来源是**先下载一遍**才开训，第一次启动会等得比较久。
+- `--mm_data` 用逗号分隔，每一项既可以是本地 jsonl 路径（`data/sft/*.jsonl` 就是），也可以是
+  `parquet:` / `jsonl:<glob>` 这类源；这类来源会先流式过一遍 `normalize_messages`，落到 `--mm_cache`
+  （默认 `data/cache`，可复用）的一个 jsonl 里再训练，这样 `Dataset` 仍按字节偏移随机读、`--resume`
+  精确，也不会把整个数据集塞进内存。无法映射成 user/self 的记录（角色写成 `assistant`、只有一轮没有回复、
+  字段认不出来）在落盘和读取时都会被跳过，`prepare_local_data.py` 落盘时会打印同样的计数。
 - 只有带 `"image"` 字段的记录才需要 `--image_root`；纯文本 SFT 不用给。
-- **磁盘预算**：桶的池子就是源的全量，所以每个桶要下的是**它自己的全部**——全量下上表所有源约 **16 GB**，
-  按当前配比实际需要 **~12.5 GB**：
+- **磁盘预算**：快照本体 **18.33 GiB**（只读，训练不复制它）；训练侧另需 `data/<bucket>/*.jsonl` 与
+  `data/sft/*.jsonl` 清洗产物约 **2.7 GB**（SFT 的 human_dialog 1.6 GB + persona 65 MB + 各桶 1.1 GB）、
+  token 分片 `data/bin/*`（uint16 即 2 B/token）约 **10.6 GB**（allocate 之和 ≈5.39B token），加 `last/`
+  （~1.6 GB 优化器状态）与各阶段 `final/`，一次完整三阶段训练合计约 **15 GB**。
+- **来源顺序是取舍**：`--source` 按给定顺序读、共享同一个 cap，cap 卡住就停在那个源中间。各桶实测的
+  排序依据：
 
-  | 桶 | 源 | 全量 | 按配比实际需要 |
+  | 源 | 排序依据 | cap 卡住时丢掉的部分 | 判断 |
   |---|---|---|---|
-  | chat | LCCC base + large | 1.67 GB | 1.67 GB（全要） |
-  | chat | anime-subtitles（清洗产物 dialogue.jsonl） | 1.30 GB + 3.37 GB 派生 | 全要（有效 ~0.43B token） |
-  | en_chat | soda + 真人小集 | 0.91 GB | 0.91 GB（全要） |
-  | fiction | webnovel-chinese | 3.16 GB | 3.16 GB（全要） |
-  | fiction | Miaowuawa/ChineseNovels | 0.62 GB | 全要（拆章后 ≈0.25B token） |
-  | long | Zhihu-KOL | 1.50 GB | 1.50 GB（全要） |
-  | wiki | baidu-baike（parquet） | 3.21 GB | ~2.8 GB（按 allocate 读到常见实体为止） |
-  | wiki | 萌娘百科（原始 wikitext） | 0.30 GB | 全要（清洗后写 `data/wiki/`，token 重测） |
-  | roleplay | 三个集 | 0.09 GB | 全要 |
-  | roleplay_char | ChatHaruhi-54K | 0.03 GB | 全要（对白 ~3.5M token） |
-  | roleplay_catgirl | kxdw2580/catgirl-dataset v2 | 0.001 GB | 全要（~0.15M token） |
-  | **合计** | | **~16 GB** | **~12.5 GB 下载 + 3.4 GB 清洗产物** |
-
-  ⚠️ `--source` 是**按给定顺序**读、共享同一个预算的，cap 又是"读完就停"的语义，所以顺序就是取舍：
-  长文桶只有知乎，百科桶是百度百科在前、萌娘百科在后（前者按常见词 → 冷门实体排序，截断正好落在长尾上），
-  英文桶 SODA 在前、真人小集在后（cap 高于两者之和，谁都不会被截）。
-  另外：分片粒度会让实际值偏高（LCCC / soda / 网文每片 300+ MB）。`baidu-baike` 优先走 parquet 分支：
-  3.2 GB vs 原始单文件 json 16.8 GB。
-  派生出的 token 分片（`data/bin/*`，uint16 即 2 B/token）再占 **~10.6 GB**（allocate 之和 ≈5.39B token）；
-  加 `last/`（~1.6 GB 优化器状态）与各阶段 `final/`，一次完整三阶段训练合计约 **28 GB**。
-  `--mm_data` 的远程来源会在 `--mm_cache` 另落一份 jsonl 缓存。
-  ⚠️ **`hf:` 流式读取不是"不落盘"**：下载的 parquet 会留在 HF 缓存里（本机实测
-  `~/.cache/huggingface` 已堆到 **5 GB**，其中 `hub/blobs` 2.3 GB）。所以上表"实际需要"要再加上缓存，
-  大盘紧张时用 `HF_HOME=/big/disk` 指过去，或每跑完一个桶 `huggingface-cli delete-cache`。
-- **"只取前几片"不是随机抽样——分片顺序是有结构的**（实测各源首片/末片）：
-
-  | 源 | 排序依据 | 没下载到的那部分 | 判断 |
-  |---|---|---|---|
-  | baidu-baike | 常见词 → 冷门实体（首片 `红色食品`/`丈夫`，末片 `林周风毛菊`/`新疆华凌工贸`） | 冷门实体；且 parquet 分支本身只覆盖原 json 的 30% | ✅ 全池一遍；排序让"只取前几片"也落在常见实体上 |
-  | webnovel | 按书顺序（首片《(种田文系列)无尽相思风》第一章） | 书单靠后的部分 | ✅ 现在是全量 10 片，不再截断 |
-  | anime-subtitles | 按目录（首片 `剧场版(OVA)`，末片 `季度番(散)`） | 只取 20% 就只有剧场版，没有 TV 系列 | ✅ 清洗脚本跑全 60 片，全量保留 |
+  | baidu-baike | 常见词 → 冷门实体（首片 `红色食品`/`丈夫`，末片 `林周风毛菊`/`新疆华凌工贸`） | 冷门实体；且 parquet 分支本身只覆盖原 json 的 30% | ✅ wiki 有意只读前 1.18B，丢掉冷门尾部 |
+  | webnovel | 按书顺序（首片《(种田文系列)无尽相思风》第一章） | 书单靠后的部分 | ✅ 全量 10 片，cap 不卡 |
+  | anime-subtitles | 按目录（首片 `剧场版(OVA)`，末片 `季度番(散)`） | 只取一部分就只有剧场版，没有 TV 系列 | ✅ 清洗产物跑全 60 片，全量保留 |
   | LCCC base/large | 无明显主题序 | — | ✅ 基本无偏（两者重叠 ~30%，在意唯一 token 时只用 large） |
 
-  所以 baidu 直接顺序读没问题（预算覆盖全池）；字幕在清洗时跑全 60 片；网文把 10 片全下（3.16 GB）后整份读入。
+  其余桶的 cap 都在池子之上，整份读入；只有 wiki 有意卡在池子下面，所以它把萌娘百科排在百度百科前面。
 
 ## 6. 评测
 

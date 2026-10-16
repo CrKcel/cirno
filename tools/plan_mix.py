@@ -261,7 +261,7 @@ def print_commands(resolved, out_dir, tokenizer, python="python"):
         print(f"{python} scripts/train.py --stage sft --plan {out_dir}/plan.resolved.json --phase sft \\\n"
               f"    --tokenizer {tokenizer} --init_from runs/align/final --out_dir runs/sft \\\n"
               f"    --mm_data data/sft/human_dialog.jsonl,data/sft/persona.jsonl,data/sft/refuse.jsonl \\\n"
-              f"    --mm_weights {','.join(str(x) for x in sft.get('mix_weights', []))} --resume")
+              f"    --mm_weights {','.join(str(x) for x in sft.get('mix_weights', []))} --desegment --resume")
 
 
 def main():
