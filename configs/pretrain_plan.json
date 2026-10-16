@@ -1,0 +1,84 @@
+{
+  "version": 2,
+  "budget_tokens": 5390000000,
+  "schedule": {
+    "type": "wsd",
+    "peak_lr": 0.001,
+    "warmup_frac": 0.02,
+    "decay_frac": 0.2,
+    "min_lr_ratio": 0.1,
+    "weight_decay": 0.1,
+    "betas": [0.9, 0.95],
+    "clip": 1.0
+  },
+  "bins": {
+    "chat":             {"dir": "data/bin/chat",             "expected_tokens": 1010000000, "allocate": 1212000000, "val_tokens": 4000000},
+    "en_chat":          {"dir": "data/bin/en_chat",          "expected_tokens": 810000000,  "allocate": 810000000,  "val_tokens": 1000000},
+    "fiction":          {"dir": "data/bin/fiction",          "expected_tokens": 1593000000, "allocate": 1593000000, "val_tokens": 2500000},
+    "long":             {"dir": "data/bin/long",             "expected_tokens": 527000000,  "allocate": 527000000,  "val_tokens": 2000000},
+    "wiki":             {"dir": "data/bin/wiki",             "expected_tokens": 1425000000, "allocate": 1225550000, "val_tokens": 2500000},
+    "roleplay":         {"dir": "data/bin/roleplay",         "expected_tokens": 17200000,   "allocate": 17200000,   "val_tokens": 200000},
+    "roleplay_char":    {"dir": "data/bin/roleplay_char",    "expected_tokens": 5100000,    "allocate": 5100000,    "val_tokens": 100000},
+    "roleplay_catgirl": {"dir": "data/bin/roleplay_catgirl", "expected_tokens": 150000,     "allocate": 150000,     "val_tokens": 20000}
+  },
+  "pretrain": [
+    {
+      "name": "A",
+      "tokens": 1210000000,
+      "seq_len": 2048,
+      "micro_batch": 2,
+      "grad_accum": 128,
+      "train": "llm",
+      "mtp_weight": 0.3,
+      "compile": true,
+      "shares": {"fiction": 0.45, "long": 0.35, "wiki": 0.20}
+    },
+    {
+      "name": "B",
+      "comment": "budget = budget_tokens - A - C; the dialogue phase takes everything the other two left",
+      "seq_len": 1024,
+      "micro_batch": 2,
+      "grad_accum": 256,
+      "train": "llm",
+      "mtp_weight": 0.3,
+      "compile": true
+    },
+    {
+      "name": "C",
+      "tokens": 1080000000,
+      "seq_len": 1024,
+      "micro_batch": 2,
+      "grad_accum": 256,
+      "train": "llm",
+      "mtp_weight": 0.3,
+      "mtp_weight_final": 0.1,
+      "compile": true,
+      "fixed": {"chat": 0.40, "en_chat": 0.03, "fiction": 0.27, "long": 0.03, "wiki": 0.235},
+      "rest": ["roleplay", "roleplay_char", "roleplay_catgirl"],
+      "absorber": "chat"
+    }
+  ],
+  "align": {
+    "stage": "align",
+    "seq_len": 512,
+    "micro_batch": 8,
+    "grad_accum": 32,
+    "lr": 0.0005,
+    "warmup": 0.05,
+    "epochs": 1,
+    "train": "vit",
+    "mtp_weight": 0.0
+  },
+  "sft": {
+    "stage": "sft",
+    "seq_len": 1024,
+    "micro_batch": 8,
+    "grad_accum": 16,
+    "lr": 0.0002,
+    "warmup": 0.03,
+    "epochs": 2,
+    "train": "llm",
+    "mtp_weight": 0.1,
+    "mix_weights": [0.74, 0.21, 0.05]
+  }
+}

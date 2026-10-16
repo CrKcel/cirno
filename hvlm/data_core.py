@@ -66,6 +66,51 @@ class TokenMixer:
 
 
 # ----------------------------------------------------------------------------------------------
+# weighted sampling over chat sources
+# ----------------------------------------------------------------------------------------------
+def weighted_schedule(counts, weights, total, seed=0):
+    """Deterministic sample-index schedule realising a target mixture exactly.
+
+    `counts[i]` is how many records group i holds and `weights[i]` its target share.  The share is
+    realised by *repeating* a source that is too small for it (records are cycled through fresh
+    permutations), which is what makes a mixture target meaningful for a small but important slice such
+    as the SFT refusal set: capping at one pass instead would let a 500-row source never exceed 3.7% of
+    a 13.5k-row corpus however it is weighted.  Returns int32 indices into the concatenation of the
+    groups, deterministic in (counts, weights, total, seed), so `sample_order` resumes it exactly.
+    """
+    counts = np.asarray(counts, dtype=np.int64)
+    weights = np.asarray(weights, dtype=np.float64)
+    if len(weights) != len(counts):
+        raise ValueError(f"{len(weights)} weights for {len(counts)} groups")
+    total = int(total)
+    live = counts > 0
+    if total <= 0 or not live.any():
+        return np.zeros(0, dtype=np.int32)
+    w = np.where(live, np.maximum(weights, 0.0), 0.0)
+    if w.sum() <= 0:  # no usable weights: fall back to the sources' own proportions
+        w = np.where(live, counts.astype(np.float64), 0.0)
+    w = w / w.sum()
+    want = total * w
+    take = np.floor(want).astype(np.int64)
+    for i in np.argsort(-(want - take), kind="stable"):  # largest-remainder rounding
+        if total - int(take.sum()) <= 0:
+            break
+        if live[i]:
+            take[i] += 1
+    base = np.concatenate([[0], np.cumsum(counts)])[:-1]
+    chunks = []
+    for i, k in enumerate(take):
+        if k <= 0:
+            continue
+        perms = [np.random.default_rng([seed, e, i]).permutation(int(counts[i]))
+                 for e in range(int(np.ceil(k / counts[i])))]
+        chunks.append(np.concatenate(perms)[:k] + base[i])
+    sched = np.concatenate(chunks)
+    np.random.default_rng([seed, 997]).shuffle(sched)
+    return sched.astype(np.int32)
+
+
+# ----------------------------------------------------------------------------------------------
 # chat / multimodal formatting
 # ----------------------------------------------------------------------------------------------
 # The imitated speaker is role "self": the model is a human chat partner, not an assistant.  "gpt" (LLaVA)

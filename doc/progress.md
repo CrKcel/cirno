@@ -20,9 +20,20 @@
   `messages` / `conversations` / 整段对话列表 / `instruction→output` / PersonaChat 这几种开源数据集形状。
 - **训练**：单卡三阶段 trainer（`pretrain` / `align` / `sft`）、WSD 与 cosine 调度、`--resume` 续训
   （含数据顺序与 GradScaler 状态）、自动 mixed precision、按需梯度/CE 检查点（启动探针决定）、
-  可选 `torch.compile`、CUDA 分配器上限 `--max_mem_gb`。预训练是 5.39B token 的三段数据课程
-  （长文 seq 2048 → 对话 → 退火 + 角色扮演，见 `doc/training.md` §2），由三次 `--resume` run 编排：
-  `--tokens` 传累计目标，中间段用 `--decay_frac 0` 保持恒定 lr，接起来仍是一条完整的 WSD 曲线。
+  可选 `torch.compile`、CUDA 分配器上限 `--max_mem_gb`。
+  训练配方是文件：`configs/pretrain_plan.json` 声明三段预算、形状、每桶 `allocate` 与配比目标，
+  `tools/plan_mix.py --plan ... --write` 用各桶实测 `train_tokens` 解析出 `plan.resolved.json`，
+  `train.py --plan --phase A|B|C` 直接执行——权重与 `--tokens` 都是推导值，学习率是一条以 token 为轴的
+  全局 WSD（2% warmup → 恒定 → 最后 20% 衰减，衰减起点 = 退火段起点），不再需要手写累计 token 与
+  `--decay_frac 0`。5.39B token 的三段课程见 `doc/training.md` §2：chat 刻意读 1.20 遍、
+  wiki 读 0.86 遍，把 200M token 从百科长尾挪到退火段的对话重放，全程对话占比 34.2% → 37.5%。
+  SFT 的配比有了旋钮：`--mm_weights` 按目标份额采样（小于份额的源被重复到该份额），
+  §4.4 的拒答 2–8% 不再靠人工数行数。
+- **监控**：每个 run 写 `metrics.jsonl`（结构化的 loss / lm / mtp / lr / lr_scale / gnorm / tok_s / step_s /
+  mem / 验证 ppl / 全局 token 进度）与 `health.jsonl`（异常与干预事件）；`tools/watch_training.py`
+  零依赖实时看板（进度、loss EMA、sparkline、ETA、告警）；`hvlm/monitor.py` 的判定与受控干预
+  （loss/梯度尖峰触发 lr 回退并逐步释放、可选按验证集早停、吞吐与显存告警），
+  `--no_intervention` / `--no_monitor` 可分别关掉干预与整个指标流。见 `doc/monitoring.md`。
 - **推理**：`scripts/sample.py`（chat / `--raw` 续写、可选图像、temperature / top_k）；`hvlm.register()`
   可把模型注册进 transformers 的 Auto 类。
 - **工程**：numpy-only 检查脚本可在无 torch 环境跑；合成数据冒烟；`tools/measure_batch.py` 在本机重测
@@ -33,7 +44,7 @@
 - **KV / 状态缓存**：`generate_simple` 每步重算前缀，只适合冒烟测试；未接入 `GenerationMixin.generate()`。需补 GDN 的递推状态 + conv 状态缓存。
 - **端侧量化**
 - **身份与 persona**：`system` 预设已支持且不计损失，但没有身份注入模板、也没有跨会话一致性检查；无预设时身份从语料随机采样、可能前后不一致（定位内的预期行为，需要评测覆盖而不是"修复"）。
-- **评测**：未集成对话评测，验证集只给出 ppl。缺人类盲测、越界拒答率/误拒率、回复长度分布、助理腔模式词命中等脚本。**尤其是没有知识评测**——想判断"通识够不够"必须先有 50–200 题的常识集（天气/心情/身边事/简单事实 + 若干"该答不知道"），用生成而不是 ppl 打分；在那之前"加百科"是盲加（见 `doc/training.md` §2）。
+- **评测**：未集成对话评测，验证集只给出 ppl（监控会跟踪它的最好值与平台期，但不替代评测）。缺人类盲测、越界拒答率/误拒率、回复长度分布、助理腔模式词命中等脚本。**尤其是没有知识评测**——想判断"通识够不够"必须先有 50–200 题的常识集（天气/心情/身边事/简单事实 + 若干"该答不知道"），用生成而不是 ppl 打分；在那之前"加百科"是盲加（见 `doc/training.md` §2）。
 - **拒答数据**：无内置越界 prompt 库与人类口吻拒答模板
 - **字幕集清洗**：`scripts/clean_ass.py`（`--zh-only --t2s`）。`chenrm/anime-subtitles` 的 `data` 字段是整份
   `.ass`（见 `doc/datasets.md` §1.1），全量 11.43B 原始字符里只有 2.93B 是对白（25.6%）——不清洗等于把四分之
@@ -45,8 +56,8 @@
   也是噪声，需要在 `clean_ass.py` 里丢掉单字重复行。做完这两步字幕才能按"全量对白"来算，chat 桶也才有
   从 1.01B 再往上扩的空间。
 - **chat 桶是最紧的一环**：LCCC base+large 453M + 字幕有效 428M + b-corpus `v-corpus-zh` ≈130M ≈ 1.01B
-  token，按"每个桶一遍"的配方 chat 只占预算 18.7%。想把对话占比拉回 1/3，只能扩源：修好卡拉OK 问题后的
-  字幕余量、播客/群聊转写。
+  token；配方已经让它读 1.20 遍（退火段 41.4%），全程对话 37.5%。再往上只能扩源：修好卡拉OK 问题后的
+  字幕余量、播客/群聊转写——重采样第二遍的边际收益低于新语料。
 - **流行文化语料没有清洗脚本**：`Limour/b-corpus` 全量已归入六个桶（1,819 个文件 / 552.6 MB，新增
   ≈370M token，映射见 `doc/datasets.md` §1），但每个子目录都要同一个前置步骤：解压 `.txt.gz`、按行
   或按章、按场景切分、去掉 `角色名：`/`system：` 前缀，仓库里还混着 130 多个 `.py`/`.bat` 提取脚本；
@@ -62,21 +73,20 @@
   约占该桶九成，都偏离 `doc/training.md` §0"用人类对话调风格"的原则；定性、抽查结论与「为什么不加英文
   百科」都写在 `doc/datasets.md` §1.2 英文对话部分。仍需评测覆盖：在 `doc/training.md` §6 的回复长度
   分布与助理腔模式词统计里单独看它们的影响，中文闲聊一旦回退就优先降它们的权重。
-- **SFT 没有配比控制点**：`ChatDataset` 把 `--mm_data` 的各项**按行数拼接**成一个 offsets 列表，没有权重
-  参数——`human_dialog.jsonl : persona.jsonl : refuse.jsonl` 的比例谁的行数多谁说了算，`doc/training.md`
-  §4.4 要求的"拒答 2–8%"目前只能靠人工数行数落实。所以说"对话比例放到 SFT 调"在当前代码里**没有可调的
-  旋钮**。需要补：给 SFT 来源加权重（或按目标比例重采样），并打一份各来源的行数/长度分布报告。
+- **SFT 来源的报告**：`--mm_weights` 已经能按目标份额采样，但还没有各来源的行数/长度分布报告
+  （回复长度分位数、助理腔模式词命中），要做 §6 的形态评测得先有这份报表。
 - **小说桶的来源限制**：现代出版中文小说有版权、开源界不存在；小说桶能上量的只有网文，所以"多来点
   人类写的小说"只能靠在小说桶内替换提质（1.176B token 就是网文 parquet 分支的全量），不能靠新增来源。
 - **分片顺序偏差**：`prepare_data` 按 `parquet:` glob 的排序顺序读、遇 `--max_tokens` 即停，而分片顺序
   是有结构的——各源首/末片实测见 `doc/training.md` §5，baidu 的排序让"取前几片"正好落在常见实体上
-  （现在预算覆盖全池，整份读完），字幕则偏得很厉害（按目录分片，只取一部分就只有剧场版、没有 TV 系列）。
-  当前配方靠"字幕跑全 60 片、网文下全 10 片、预算覆盖各桶池子"绕开这个问题；要支持按目录/按书采样，
-  得给 `parquet:` 的 `hf://` glob 加「按步长/随机挑分片」的能力（如 `--shard_stride N` 或 spec 后缀
-  `@stride=N`）。
+  （配方只读 0.86 遍，截断落在冷门实体上，是有意的），字幕则偏得很厉害（按目录分片，只取一部分就只有
+  剧场版、没有 TV 系列）。当前配方靠"字幕跑全 60 片、网文下全 10 片、其余桶预算覆盖池子"绕开这个问题；
+  要支持按目录/按书采样，得给 `parquet:` 的 `hf://` glob 加「按步长/随机挑分片」的能力
+  （如 `--shard_stride N` 或 spec 后缀 `@stride=N`）。
 - **LCCC base 与 large 有重叠**：实测在 large 的一个分片里检索 base 采样，直接命中 6.7%；按分片占比
   （2.8M/12M）折算，两者真实重叠约 **30%**。base 本来就是 large 的清洗子集，所以同时用两个来源会让
-  ~7% 的 chat 桶 token 是重复对话（一遍的桶里再叠一层）。要在意就去重，或只用 large。
+  ~7% 的 chat 桶 token 是重复对话；配方又让 chat 读 1.20 遍，重复量因此还要乘 1.2。要去重的话，
+  直接去掉 base（损失约 7% 唯一 token）比在 tokenize 之后做近似去重更划算。
 - **视觉输入**：固定 224×224 单图（等比填充成正方形）；不支持原生动态分辨率、多图交错与视频。
 - **视觉对齐**：ViT 从零训练（14.4M），未含对比学习/蒸馏预训练这一步，识别能力有限；纯文本部署可整个跳过 align 阶段。开源的对话内图文集把图片存在数据集内部，`--mm_data` 还指不过去，需要先把图导出到 `--image_root` 下。
 - **预训练细节**：按文档拼接打包，没有跨文档掩码；会话边界依赖 `<|endoftext|>` 与打包策略。

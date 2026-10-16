@@ -21,6 +21,7 @@ from hvlm.configuration_hvlm import HVLMConfig  # noqa: E402
 from hvlm.data_core import sample_order  # noqa: E402
 from hvlm.gated_delta import fla_available, fla_error, fla_version, resolve_impl  # noqa: E402
 from hvlm.modeling_hvlm import HVLMForConditionalGeneration  # noqa: E402
+from hvlm.monitor import HealthPolicy, MetricsLog, json_safe  # noqa: E402
 
 STAGE_DEFAULTS = {
     "pretrain": dict(lr=1e-3, warmup=0.02, seq_len=1024, micro_batch=2, grad_accum=256, train="llm",
@@ -31,18 +32,35 @@ STAGE_DEFAULTS = {
                      mtp_weight=0.1, vit_lr_mult=0.5),
 }
 
+# Recipe records (configs/pretrain_plan.json, resolved by tools/plan_mix.py) use the same names as the
+# command line wherever the meaning is identical; the schedule block is global and the phase record wins.
+PLAN_ARG_MAP = {"seq_len": "seq_len", "micro_batch": "micro_batch", "grad_accum": "grad_accum",
+                "lr": "lr", "warmup": "warmup", "min_lr_ratio": "min_lr_ratio",
+                "weight_decay": "weight_decay", "mtp_weight": "mtp_weight",
+                "mtp_weight_final": "mtp_weight_final", "train": "train", "epochs": "epochs"}
+PLAN_SCHEDULE_MAP = {"peak_lr": "lr", "warmup_frac": "warmup", "decay_frac": "decay_frac",
+                     "min_lr_ratio": "min_lr_ratio", "weight_decay": "weight_decay", "clip": "clip"}
 
-def parse_args():
+
+def build_parser():
     ap = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    ap.add_argument("--stage", choices=list(STAGE_DEFAULTS), required=True)
+    ap.add_argument("--stage", choices=list(STAGE_DEFAULTS), default=None,
+                    help="required unless --plan names a phase that carries a stage")
     ap.add_argument("--config", default="configs/hvlm_130m.json", help="used when --init_from is not given")
     ap.add_argument("--init_from", default=None, help="save_pretrained directory to start from (stages 2/3)")
     ap.add_argument("--tokenizer", required=True)
     ap.add_argument("--out_dir", required=True)
+    ap.add_argument("--plan", dest="plan_path", default=None,
+                    help="resolved recipe (tools/plan_mix.py --write); supplies the phase's mixture, "
+                         "shape and learning-rate schedule")
+    ap.add_argument("--phase", dest="phase_name", default=None, help="which phase of --plan to run")
     # data
     ap.add_argument("--data", default=None, help="pretrain: dir:weight,dir:weight  (dirs from prepare_data.py)")
     ap.add_argument("--mm_data", default=None, help="align/sft: comma-separated jsonl files and/or source "
                                                    "specs (hf:..., parquet:..., jsonl:<glob>; see doc/training.md 5)")
+    ap.add_argument("--mm_weights", default=None,
+                    help="align/sft: comma-separated sampling weights, one per --mm_data item; defaults to "
+                         "uniform.  Without it a source's share is decided by its line count")
     ap.add_argument("--image_root", default=".")
     ap.add_argument("--val_mm_data", default=None, help="optional jsonl/spec for validation in align/sft")
     ap.add_argument("--mm_cache", default="data/cache",
@@ -64,7 +82,7 @@ def parse_args():
     # optimisation
     ap.add_argument("--lr", type=float, default=None)
     ap.add_argument("--vit_lr_mult", type=float, default=None)
-    ap.add_argument("--min_lr_ratio", type=float, default=0.1)
+    ap.add_argument("--min_lr_ratio", type=float, default=None)
     ap.add_argument("--warmup", type=float, default=None, help="fraction of steps")
     ap.add_argument("--schedule", choices=["wsd", "cosine"], default="wsd")
     ap.add_argument("--decay_frac", type=float, default=0.2, help="wsd: final fraction of steps spent decaying")
@@ -106,13 +124,81 @@ def parse_args():
     ap.add_argument("--eval_batches", type=int, default=50)
     ap.add_argument("--save_every", type=int, default=500)
     ap.add_argument("--resume", action="store_true")
-    a = ap.parse_args()
+    # monitoring (hvlm/monitor.py; see doc/monitoring.md)
+    ap.add_argument("--no_monitor", action="store_true", help="write only the legacy log.jsonl")
+    ap.add_argument("--no_intervention", action="store_true",
+                    help="report anomalies in health.jsonl but never change the learning rate or stop early")
+    ap.add_argument("--spike_sigma", type=float, default=4.0, help="loss-spike threshold in recent std devs")
+    ap.add_argument("--gnorm_spike_factor", type=float, default=20.0, help="grad-norm spike, as a multiple of --clip")
+    ap.add_argument("--throughput_drop", type=float, default=0.5, help="alert below this fraction of the running tok/s")
+    ap.add_argument("--lr_backoff", type=float, default=0.5, help="lr multiplier per loss/grad spike (1.0 = off)")
+    ap.add_argument("--backoff_steps", type=int, default=300, help="how long a backoff is held before release")
+    ap.add_argument("--early_stop_patience", type=int, default=0,
+                    help="stop after this many evaluations without a new best val loss (0 = off)")
+    ap.add_argument("--early_stop_min_frac", type=float, default=0.5,
+                    help="ignore --early_stop_patience before this fraction of the run")
+    return ap
+
+
+def load_plan(path, phase):
+    """Read a resolved recipe and return (plan, phase record)."""
+    if not os.path.exists(path):
+        raise SystemExit(f"--plan {path} does not exist; write it with "
+                         f"`python tools/plan_mix.py --plan <recipe> --write {path}`")
+    plan = json.load(open(path, encoding="utf-8"))
+    phases = plan.get("phases", {})
+    if not phases:  # the editable recipe, not the resolved one: it still needs the bins' token counts
+        raise SystemExit(f"{path} has no 'phases' - resolve the recipe first: "
+                         f"`python tools/plan_mix.py --plan {path} --write <out_dir>/plan.resolved.json`")
+    if phase is None:
+        candidates = [n for n, p in phases.items() if p.get("stage") == "pretrain"]
+        if len(candidates) != 1:
+            raise SystemExit(f"--plan needs --phase (one of {sorted(phases)})")
+        phase = candidates[0]
+    if phase not in phases:
+        raise SystemExit(f"--phase {phase!r} is not in {path}: {sorted(phases)}")
+    return plan, phases[phase]
+
+
+def parse_args(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    ap = build_parser()
+    a = ap.parse_args(argv)
+    a.plan, a.phase = None, None
+    if a.plan_path:
+        plan, rec = load_plan(a.plan_path, a.phase_name)
+        defaults = {}
+        for key, dest in PLAN_ARG_MAP.items():
+            if key in rec:
+                defaults[dest] = rec[key]
+        for key, dest in PLAN_SCHEDULE_MAP.items():
+            if key in plan.get("schedule", {}):
+                defaults.setdefault(dest, plan["schedule"][key])
+        if "betas" in plan.get("schedule", {}):
+            defaults.setdefault("betas", ",".join(str(b) for b in plan["schedule"]["betas"]))
+        if rec.get("compile"):
+            defaults["compile"] = True
+        if rec.get("stage"):
+            defaults["stage"] = rec["stage"]
+        ap.set_defaults(**defaults)  # explicit command-line flags still win over the recipe
+        a = ap.parse_args(argv)
+        a.plan, a.phase = plan, rec
+        if rec.get("stage") == "pretrain":
+            if "--data" not in argv:
+                a.data = ",".join(rec["data"])
+            a.tokens = a.max_steps or rec["cum_end"]
     if a.no_grad_ckpt:  # deprecated alias, kept so old command lines keep working
         a.grad_ckpt = "off"
+    if a.stage is None:
+        ap.error("--stage is required unless --plan names a phase that carries one")
     d = STAGE_DEFAULTS[a.stage]
     for k, v in d.items():
         if getattr(a, k, None) is None:
             setattr(a, k, v)
+    if a.min_lr_ratio is None:  # not a per-stage default, but the recipes can set it
+        a.min_lr_ratio = 0.1
+    if a.mm_weights:
+        a.mm_weights = [float(x) for x in a.mm_weights.split(",")]
     return a
 
 
@@ -142,6 +228,22 @@ def lr_at(step, total, warmup_steps, base, min_ratio, schedule, decay_frac):
     if step < decay_start:
         return base
     return base * (1 - (1 - min_ratio) * (step - decay_start) / max(1, total - decay_start))
+
+
+def lr_at_tokens(tokens_done, budget, warm_frac, decay_frac, base, min_ratio):
+    """Same WSD shape as `lr_at`, but indexed by tokens over the *whole* recipe.
+
+    A phase run only knows its own end step, so the plan's three runs each evaluate this with the global
+    token count (`step * tokens_per_step`): warmup, the flat middle and the final decay then form one
+    continuous curve without the `--decay_frac 0` / cumulative `--tokens` bookkeeping the recipe used to
+    need."""
+    warm = warm_frac * budget
+    if tokens_done < warm:
+        return base * max(tokens_done, 0.0) / max(warm, 1.0) if warm else base
+    decay_start = (1.0 - decay_frac) * budget
+    if tokens_done < decay_start:
+        return base
+    return base * (1 - (1 - min_ratio) * (tokens_done - decay_start) / max(budget - decay_start, 1.0))
 
 
 def build_param_groups(model, a):
@@ -282,6 +384,7 @@ def setup_execution(a, model, device, dtype_ctx, budget_gb):
 
 @torch.no_grad()
 def evaluate(model, loaders, device, dtype_ctx, n_batches):
+    """Mean LM loss (and ppl) per validation loader; feeds both the log and the health policy."""
     model.eval()
     res = {}
     for name, dl in loaders.items():
@@ -292,12 +395,20 @@ def evaluate(model, loaders, device, dtype_ctx, n_batches):
             batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
             with dtype_ctx():
                 out = model(**batch, compute_mtp=False)
-            tot += float(out.lm_loss)
+            tot += float(out.lm_loss.detach())
             n += 1
         if n:
-            res[name] = tot / n
+            loss = tot / n
+            res[name] = dict(loss=loss, ppl=math.exp(min(loss, 700.0)))
     model.train()
     return res
+
+
+def report_events(events_log, events):
+    """Write policy events to health.jsonl and echo them next to the training line."""
+    for e in events:
+        events_log.write(e)
+        print(f"[{e['level'].upper()}] step {e['step']} {e['code']}: {e['message']}", flush=True)
 
 
 def save_checkpoint(model, opt, out_dir, tag, step, samples, tokenizer_path=None, scaler=None):
@@ -354,6 +465,24 @@ def main():
 
     tok = AutoTokenizer.from_pretrained(a.tokenizer)
 
+    # ---- monitoring -----------------------------------------------------------------------------
+    # The recipe's schedule is what the policy judges against, so it is resolved before the model is
+    # built: without a plan there is no global budget and only the per-run thresholds apply.
+    budget_tokens = float((a.plan or {}).get("budget_tokens") or 0.0) or None
+    mon = events_log = policy = None
+    if not a.no_monitor:
+        mon = MetricsLog(os.path.join(a.out_dir, "metrics.jsonl"))
+        events_log = MetricsLog(os.path.join(a.out_dir, "health.jsonl"))
+        policy = HealthPolicy(peak_lr=a.lr, clip=a.clip, budget_gb=budget_gb,
+                              spike_sigma=a.spike_sigma, gnorm_spike_factor=a.gnorm_spike_factor,
+                              throughput_ratio=a.throughput_drop,
+                              val_patience=a.early_stop_patience,
+                              intervene=not a.no_intervention,
+                              lr_backoff_factor=a.lr_backoff, backoff_steps=a.backoff_steps)
+        print(f"monitoring: {a.out_dir}/metrics.jsonl + health.jsonl"
+              + ("" if not a.no_intervention else " (interventions off)")
+              + (f", lr backoff x{a.lr_backoff}" if not a.no_intervention and a.lr_backoff < 1.0 else ""))
+
     # ---- model ----------------------------------------------------------------------------------
     resume_dir = os.path.join(a.out_dir, "last")
     if a.resume and os.path.isdir(resume_dir):
@@ -406,16 +535,25 @@ def main():
     else:
         assert a.mm_data, "--mm_data file.jsonl|spec[,...] is required for align/sft"
         sp = special_ids(tok)
-        ds = ChatDataset(a.mm_data.split(","), a.image_root, tok, S, vc, sp, a.mm_cache, a.desegment)
+        sources = a.mm_data.split(",")
+        ds = ChatDataset(sources, a.image_root, tok, S, vc, sp, a.mm_cache, a.desegment)
+        rows = len(ds)  # rows, not samples: --mm_weights lays out its own `epochs x rows` schedule
+        if a.mm_weights:
+            if len(a.mm_weights) != len(sources):
+                raise SystemExit(f"--mm_weights has {len(a.mm_weights)} values for {len(sources)} --mm_data items")
+            ds.set_mix(a.mm_weights, int((a.epochs or 1.0) * rows))
         collate = ChatCollator(tok.convert_tokens_to_ids("<|pad|>"), sp["image_pad"], vc.merged_grid_size)
         per_step = a.micro_batch * a.grad_accum
-        total_steps = a.max_steps or int((a.epochs or 1.0) * len(ds) / per_step)
+        total_steps = a.max_steps or int((a.epochs or 1.0) * rows / per_step)
         if a.val_mm_data:
             vds = ChatDataset(a.val_mm_data.split(","), a.image_root, tok, S, vc, sp, a.mm_cache, a.desegment)
             val_loaders["val"] = DataLoader(vds, batch_size=a.micro_batch, shuffle=False, num_workers=0, collate_fn=collate)
     total_steps = max(total_steps, 1)
     n_samples = len(ds)
     print(f"{total_steps} optimizer steps, {a.micro_batch} x {a.grad_accum} sequences per step, {S} tokens each")
+    if a.stage != "pretrain" and a.mm_weights:
+        print("mix: " + ", ".join(f"{os.path.basename(p)} weight={w:g} rows={n}"
+                                  for p, w, n in ds.source_counts()))
 
     # ---- optimiser ------------------------------------------------------------------------------
     betas = tuple(float(x) for x in a.betas.split(","))
@@ -438,14 +576,31 @@ def main():
 
     warmup_steps = max(1, int(a.warmup * total_steps))
     log_f = open(os.path.join(a.out_dir, "log.jsonl"), "a")
-    t0, tok_count, bad_steps = time.time(), 0, 0
+    if policy is not None:
+        policy.val_min_steps = int(a.early_stop_min_frac * total_steps)
+        # A backoff that outlasts a twentieth of the run is not a correction, it is a new schedule.
+        policy.backoff_steps = min(a.backoff_steps, max(10, total_steps // 20))
+    stage_tokens = a.micro_batch * a.grad_accum * S if a.stage == "pretrain" else 0.0
+    t_start = time.time()
+    t0, tok_count, bad_steps, nonfinite = time.time(), 0, 0, False
+    last_log_step = start_step
+    stopped_early = False
     step = start_step
     while step < total_steps:
-        lr = lr_at(step, total_steps, warmup_steps, a.lr, a.min_lr_ratio, a.schedule, a.decay_frac)
+        done_tokens = (step + 1) * stage_tokens
+        if a.plan and a.stage == "pretrain":
+            lr = lr_at_tokens(done_tokens, budget_tokens, a.warmup, a.decay_frac, a.lr, a.min_lr_ratio)
+        else:
+            lr = lr_at(step, total_steps, warmup_steps, a.lr, a.min_lr_ratio, a.schedule, a.decay_frac)
+        lr_scale = policy.lr_scale(step) if policy is not None else 1.0
+        lr *= lr_scale
         for g in opt.param_groups:
             g["lr"] = lr * g["lr_mult"]
-        if a.stage == "pretrain" and a.mtp_weight_final is not None and step >= int(total_steps * (1 - a.decay_frac)):
-            model.config.mtp_loss_weight = a.mtp_weight_final
+        if a.stage == "pretrain" and a.mtp_weight_final is not None:
+            switch = (done_tokens >= (1 - a.decay_frac) * budget_tokens
+                      if a.plan else step >= int(total_steps * (1 - a.decay_frac)))
+            if switch:
+                model.config.mtp_loss_weight = a.mtp_weight_final
 
         loss_sum = lm_sum = mtp_sum = 0.0
         n_mtp = 0
@@ -460,10 +615,10 @@ def main():
             if out.loss.requires_grad:  # e.g. align stage with a micro-batch that has no image
                 scaled = out.loss / a.grad_accum
                 (scaler.scale(scaled) if scaler is not None else scaled).backward()
-            loss_sum += float(out.loss)
-            lm_sum += float(out.lm_loss)
+            loss_sum += float(out.loss.detach())
+            lm_sum += float(out.lm_loss.detach())
             if out.mtp_loss is not None:
-                mtp_sum += float(out.mtp_loss)
+                mtp_sum += float(out.mtp_loss.detach())
                 n_mtp += 1
         samples += a.micro_batch * a.grad_accum
         params = [p for p in model.parameters() if p.requires_grad]
@@ -472,6 +627,7 @@ def main():
         gnorm = float(torch.nn.utils.clip_grad_norm_(params, a.clip))
         if not math.isfinite(gnorm):
             bad_steps += 1
+            nonfinite = True
             opt.zero_grad(set_to_none=True)
             if scaler is not None:
                 # fp16 overflow: halve the loss scale and let the next step retry.  This is routine for the
@@ -484,6 +640,11 @@ def main():
             if bad_steps >= 10:
                 raise RuntimeError("10 consecutive non-finite steps - lower the learning rate or check the data")
             step += 1
+            if policy is not None:
+                report_events(events_log, policy.observe(
+                    dict(t=time.time(), step=step, loss=loss_sum / a.grad_accum, gnorm=gnorm, nonfinite=True)))
+            loss_sum = lm_sum = mtp_sum = 0.0
+            n_mtp = 0
             continue
         if scaler is not None:
             scaler.step(opt)  # also skips the update if an inf/nan slipped through the clip
@@ -498,23 +659,52 @@ def main():
             if cuda:
                 torch.cuda.synchronize()
             dt = time.time() - t0
-            rec = dict(step=step, loss=loss_sum / a.grad_accum, lm=lm_sum / a.grad_accum,
-                       mtp=(mtp_sum / n_mtp) if n_mtp else None, lr=lr, gnorm=gnorm,
-                       tok_s=tok_count / dt, mem_gb=(torch.cuda.max_memory_allocated() / 1024 ** 3) if cuda else None)
-            print(" ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}" for k, v in rec.items()), flush=True)
-            log_f.write(json.dumps(rec) + "\n")
+            rec = dict(t=time.time(), step=step, stage=a.stage, phase=(a.phase or {}).get("name"),
+                       tokens=tok_count, tokens_total=done_tokens if stage_tokens else None,
+                       total_steps=total_steps, budget_tokens=budget_tokens, elapsed_s=time.time() - t_start,
+                       loss=loss_sum / a.grad_accum, lm=lm_sum / a.grad_accum,
+                       mtp=(mtp_sum / n_mtp) if n_mtp else None, lr=lr, lr_scale=lr_scale, gnorm=gnorm,
+                       grad_scale=(scaler.get_scale() if scaler is not None else None),
+                       step_s=dt / max(1, step - last_log_step),
+                       tok_s=tok_count / dt, nonfinite=nonfinite,
+                       mem_gb=(torch.cuda.max_memory_allocated() / 1024 ** 3) if cuda else None)
+            print(" ".join(f"{k}={v:.4g}" if isinstance(v, float) else f"{k}={v}"
+                           for k, v in rec.items() if k not in ("t", "tokens_total", "elapsed_s", "step_s")),
+                  flush=True)
+            log_f.write(json.dumps(json_safe({k: v for k, v in rec.items() if k not in ("nonfinite",)})) + "\n")
             log_f.flush()
-            t0, tok_count = time.time(), 0
+            if mon is not None:
+                mon.write(rec)
+                report_events(events_log, policy.observe(rec))
+            t0, tok_count, nonfinite, last_log_step = time.time(), 0, False, step
         if val_loaders and (step % a.eval_every == 0 or step == total_steps):
             res = evaluate(fwd_model, val_loaders, device, dtype_ctx, a.eval_batches)
-            print("eval", {k: f"loss {v:.4f} ppl {math.exp(v):.2f}" for k, v in res.items()}, flush=True)
-            log_f.write(json.dumps(dict(step=step, eval=res)) + "\n")
+            print("eval", {k: f"loss {v['loss']:.4f} ppl {v['ppl']:.2f}" for k, v in res.items()}, flush=True)
+            events = policy.observe_eval(step, res) if policy is not None else []
+            eval_rec = dict(t=time.time(), step=step, stage=a.stage, phase=(a.phase or {}).get("name"),
+                            eval=res, best_val=policy.best_val() if policy is not None else None,
+                            tokens_total=done_tokens if stage_tokens else None, total_steps=total_steps,
+                            budget_tokens=budget_tokens, elapsed_s=time.time() - t_start)
+            log_f.write(json.dumps(dict(step=step, eval={k: v["loss"] for k, v in res.items()})) + "\n")
             log_f.flush()
+            if mon is not None:
+                mon.write(eval_rec)
+                report_events(events_log, events)
+                if any(e["action"] == "stop" for e in events):
+                    stopped_early = True
         if step % a.save_every == 0 and step < total_steps:
             save_checkpoint(model, opt, a.out_dir, "last", step, samples, scaler=scaler)
+        if stopped_early:
+            break
 
     save_checkpoint(model, opt, a.out_dir, "last", step, samples, scaler=scaler)
     save_checkpoint(model, None, a.out_dir, "final", step, samples, tokenizer_path=a.tokenizer)
+    if mon is not None:
+        mon.close()
+        events_log.close()
+    log_f.close()
+    if stopped_early:
+        print(f"stopped early at step {step}: {os.path.join(a.out_dir, 'last')} is the stopping point")
     print(f"done. final model: {os.path.join(a.out_dir, 'final')}")
 
 

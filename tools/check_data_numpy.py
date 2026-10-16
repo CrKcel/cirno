@@ -12,7 +12,7 @@ from common_io import WHOLE, _split_file_spec, desegment_cjk, field_text, iter_t
 from tokenizers import Regex, pre_tokenizers  # noqa: E402
 from train_tokenizer import SPLIT_REGEX  # noqa: E402
 from hvlm.data_core import (TokenMixer, collate_sequences, encode_conversation,  # noqa: E402
-                            normalize_messages, sample_order)
+                            normalize_messages, sample_order, weighted_schedule)
 
 ok = True
 
@@ -57,6 +57,27 @@ with tempfile.TemporaryDirectory() as td:
     starts = {int(mix.get(i)[0]) for i in a_idx}
     check("no repetition within an epoch of a source", len(starts) == 50)
     check("shard boundary handled (source b spans 2 shards)", mix.source_chunks() == [50, 30])
+
+# ---- weighted chat schedule --------------------------------------------------------------------
+# An SFT mixture target is exact: a source smaller than its target share is repeated, which is what
+# lets a small refusal slice hold 5% of the corpus.  The plan's own document says the share is a knob.
+sched = weighted_schedule([100, 20], [0.5, 0.5], 240, seed=7)
+check("the schedule has exactly the requested length", len(sched) == 240)
+check("every scheduled index is a real record", sched.min() >= 0 and sched.max() < 120)
+check("weights above a source's size are realised by repeating it",
+      int((sched < 100).sum()) == 120 and int((sched >= 100).sum()) == 120,
+      f"({int((sched < 100).sum())}/{int((sched >= 100).sum())})")
+check("every record of the repeated source is used at least once",
+      len(set(sched[sched >= 100].tolist())) == 20)
+sched = weighted_schedule([100, 100], [0.75, 0.25], 200, seed=7)
+used = np.bincount(sched[sched < 100], minlength=100)
+check("a mixture that fits a single pass repeats only what the share needs",
+      int((sched < 100).sum()) == 150 and used.max() == 2 and int((used == 2).sum()) == 50,
+      f"({int((sched < 100).sum())}, max {used.max()}, {int((used == 2).sum())} doubled)")
+check("the schedule is deterministic", (weighted_schedule([100, 100], [0.75, 0.25], 200, 7) == sched).all())
+check("an empty source takes no share", int((weighted_schedule([10, 0], [0.5, 0.5], 20,
+                                                               seed=1) >= 10).sum()) == 0)
+check("zero records is an empty schedule", len(weighted_schedule([0, 0], [1.0, 1.0], 10)) == 0)
 
 # ---- chat encoding ---------------------------------------------------------------------------
 enc = lambda s: [20 + (ord(c) % 100) for c in s]

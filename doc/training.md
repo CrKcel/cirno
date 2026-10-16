@@ -34,45 +34,56 @@
 
 ## 2. 阶段 1：预训练
 
-- **数据配比是时间轴上的一条课程**。预算取各桶池子之和 **5.39B**，按 1.21B / 3.10B / 1.08B 切成三段
-  （22.5% / 57.5% / 20.0%），每段一份配比；权重由各桶 `prepare_data` 实测的 `train_tokens` 反算
-  （`tools/plan_mix.py`），预算等于池子之和，所以每个桶恰好读一遍、没有任何一段是重复采样：
+- **配方是文件，不是命令行**。`configs/pretrain_plan.json` 声明三段各自的预算、形状、配比目标，以及每个桶的
+  `allocate`（跨三段最多从这个桶取多少 token）；`tools/plan_mix.py --plan configs/pretrain_plan.json
+  --write runs/pretrain/plan.resolved.json --print-commands` 把各桶 `prepare_data` 实测的 `train_tokens` 代进去，
+  算出每段的 `--data` 权重并写出可直接执行的配方；`scripts/train.py --plan ... --phase A|B|C` 读这份文件拿
+  `--tokens`、形状、配比与调度。权重因此永远是推导值：没有桶会被要到超过它 `allocate` 的量，改配比只需改配方
+  再重跑一次这个脚本，不用手抄权重。
+- **预算 5.39B，三段 1.21B / 3.10B / 1.08B（22.4% / 57.5% / 20.0%）**，每段一份配比：
 
-  | 语料 | A 长文<br>1.21B seq 2048 | B 对话<br>3.10B seq 1024 | C 退火<br>1.08B seq 1024 | 全程 token | 池子 | 实际遍数 |
-  |---|---|---|---|---|---|---|
-  | 人类对话 / 口语文本（中文） | — | 20.8% | 34% | 1.010B | 1.010B | **1.00 遍** |
-  | 英文对话 | — | 24.9% | 3.6% | 810M | 810M | 1.00 遍 |
-  | 小说 / 网文 / 剧本对白 | 45% | 24.1% | 28% | 1.593B | 1.593B | 1.00 遍 |
-  | 长文 / 非对话文本 | 35% | 1.9% | 4% | 527M | 527M | 1.00 遍 |
-  | 通识 / 百科 / 常识 | 20% | 28.3% | 28.4% | 1.425B | 1.425B | 1.00 遍 |
-  | 角色扮演语料 | — | — | 2.1% | 22.5M | 22.5M | 1.00 遍 |
+  | 语料 | A 长文<br>1.21B seq 2048 | B 对话<br>3.10B seq 1024 | C 退火<br>1.08B seq 1024 | 全程 token | 池子 | allocate | 实读 |
+  |---|---|---|---|---|---|---|---|
+  | 人类对话 / 口语文本（中文） | — | 24.7% | 41.4% | 1.212B | 1.010B | 1.212B | **1.20 遍** |
+  | 英文对话 | — | 25.1% | 3.0% | 810M | 810M | 810M | 1.00 遍 |
+  | 小说 / 网文 / 剧本对白 | 45% | 24.4% | 27.0% | 1.593B | 1.593B | 1.593B | 1.00 遍 |
+  | 长文 / 非对话文本 | 35% | 2.3% | 3.0% | 527M | 527M | 527M | 1.00 遍 |
+  | 通识 / 百科 / 常识 | 20% | 23.5% | 23.5% | 1.225B | 1.425B | 1.225B | **0.86 遍** |
+  | 角色扮演（persona 卡片 / 小说角色 / 猫娘） | — | — | 2.1% | 22.5M | 22.5M | 22.5M | 1.00 遍 |
 
-  池子的构成（估算与取法见 [datasets.md §1](datasets.md)）：`Limour/b-corpus` 的正文类目录已全部归入
-  各桶（chat +130M、en_chat +52M、fiction +163M、long +21M、roleplay +2.2M、roleplay_char +1.6M），英文桶
-  另加 `noanabeshima/TinyStoriesV2`（+≈550M），fiction / wiki / roleplay 再收
-  `Miaowuawa/ChineseNovels`（截断后 ≈254M）、`mrzjy/chinese_moegirl_wiki_corpus_raw`（清洗后 ≈82M）、
-  `LooksJuicy/Chinese-Roleplay-SingleTurn`（≈3.3M）。后三份是抽样外推（±20%）：落盘后按 `prepare_data`
-  的 `train_tokens` 重跑一次 `tools/plan_mix.py`，预算与各桶 `--max_tokens` 跟着新的池子之和走。
+  池子的构成（估算与取法见 [datasets.md §1](datasets.md)）：`Limour/b-corpus` 的正文类目录已全部归入各桶
+  （chat +130M、en_chat +52M、fiction +163M、long +21M、roleplay +2.2M、roleplay_char +1.6M），英文桶另加
+  `noanabeshima/TinyStoriesV2`（+≈550M），fiction / wiki / roleplay 再收 `Miaowuawa/ChineseNovels`（截断后
+  ≈254M）、`mrzjy/chinese_moegirl_wiki_corpus_raw`（清洗后 ≈82M）、`LooksJuicy/Chinese-Roleplay-SingleTurn`
+  （≈3.3M）。后三份是抽样外推（±20%）：落盘后按 `prepare_data` 的 `train_tokens` 重跑一次 `tools/plan_mix.py`，
+  `expected_tokens` / `allocate` 跟着实测值走。
 
   每段的理由：
 
-  1. **A 长文（1.21B，seq 2048）**：最早的 token 在最高 lr 下训练、梯度更新最大，决定基底分布，所以
-     只放书面语与叙事——小说 45% + 长文 35% + 通识 20%，同时用 2048 的窗口让长文真的贡献长程。
-     百科在这一段只占 20%：继续加百科的收益受 116.65M 参数的容量限制（见下）。
-  2. **B 对话（3.10B，seq 1024）**：引入 chat 20.8% + 英文 24.9%，IM 语域、语气、回合节奏在这一段学；
-     小说 / 长文 / 通识给 24.1% / 1.9% / 28.3% 继续提供多样性与常识地平线。chat 只占 20.8%，是因为
-     1.01B 的池子按一遍算只能占这么多——再高就是抽第二遍，同一批对白看两次买不到新东西。
-  3. **C 退火（1.08B，seq 1024）**：与 WSD 的最后 20%、MTP 权重切换重合，配比回到部署分布——chat 34%
-     保住风格，角色扮演 2.1% 只在这里出现（池子 22.5M，一遍），长文压到 4%，让最后的梯度更新几乎
-     只改"怎么说话"。
+  1. **A 长文（1.21B，seq 2048）**：最早的 token 在最高 lr 下训练、梯度更新最大，决定基底分布，所以只放书面语
+     与叙事——小说 45% + 长文 35% + 通识 20%，同时用 2048 的窗口让长文真的贡献长程。百科在这一段只占 20%：
+     继续加百科的收益受 116.65M 参数的容量限制（见下）。
+  2. **B 对话（3.10B，seq 1024）**：引入 chat 24.7% + 英文 25.1%，IM 语域、语气、回合节奏在这一段学；小说 /
+     长文 / 通识给 24.4% / 2.3% / 23.5% 继续提供多样性与常识地平线。
+  3. **C 退火（1.08B，seq 1024）**：与 WSD 的最后 20%、MTP 权重切换重合，配比回到部署分布——chat 41.4% 保住
+     风格，角色扮演 2.1% 只在这里出现，长文压到 3.0%，让最后的梯度更新几乎只改"怎么说话"。
 
-  全程非对话 **65.8%**（小说 29.6% + 长文 9.8% + 通识 26.4%），对话 34.2%：每个桶只读一遍，所以对话占比
-  由各桶实测池子决定，调权重只会变成背语料。
+  两处刻意的重采样，是这一版配方相对"每个桶恰好一遍"的改动：
+
+  - **chat 读 1.20 遍**（1.212B / 1.010B）。对话是这个定位唯一的目标分布，而公开中文人类闲聊只有 1.01B；
+    多出的 202M 全部落在退火段（C 段 chat 占 41.4%），是给最后一段梯度做分布温度，而不是全程均匀重放。
+    会话级语料重复第二遍的边际收益低于"最后怎么说话"，这也是它能排在百科尾部前面的原因。
+  - **wiki 读 0.86 遍**（1.225B / 1.425B）。`baidu-baike` 的顺序是常见词 → 冷门实体，截掉的 200M 正好是长尾；
+    116.65M 参数本来也存不下它们，超过容量后不同事实互相干扰，反而压低已记住那些的召回。`prepare_data`
+    的 `--max_tokens` 因此按 allocate 给（1228050000 + val），少下 ~1.2 GB、少 tokenize 200M。
+
+  全程对话 **37.5%**（chat 22.5% + 英文 15.0%），非对话 62.5%（小说 29.6% + 长文 9.8% + 通识 22.7% + 角色扮演 0.4%）：
+  比上一版的 34.2% 高 3.3 个百分点，来源就是上面那次重采样。
 - **规模**：5.39B token ÷ 116.65M 参数 = **46.2 token/参数**，约为 Chinchilla 参照（2.7B）的 2 倍。
 - **chat 桶是最紧的一环**：公开中文人类闲聊加总 **1.01B token**（LCCC base+large 453M，其中 base 是
-  large 的清洗子集、两者重叠约 30%；字幕清洗后有效 428M；b-corpus `v-corpus-zh` ≈130M），占预算 18.7%，
-  仍是本配方最短的一块。要再扩只能从被卡拉OK 噪声占掉的字幕余量（先给 `clean_ass.py` 加逐字行过滤）与
-  论坛/群聊转写里找。
+  large 的清洗子集、两者重叠约 30%；字幕清洗后有效 428M；b-corpus `v-corpus-zh` ≈130M）。要再扩只能从被
+  卡拉OK 噪声占掉的字幕余量（先给 `clean_ass.py` 加逐字行过滤）与论坛/群聊转写里找；配比能做的只是把它放在
+  退火段多读一遍。
 - **长文桶以知乎为主**（实测 1.006M 条 / 0.72B 字符 ≈ **0.51B token**，一遍读完）；b-corpus 的
   `提高逼格`（白话二十四史）、`畅销书`、`散文集`（合计 ≈15M token）与 `古籍`（文言，慎用，≈6M）也归
   该桶，池子 ≈527M。
@@ -80,8 +91,8 @@
   `wdndev/webnovel-chinese` parquet 分支的全量（600k 章 / 1.68B 字符 ≈ 1.176B token）。b-corpus 再补
   `互动小说`（同人、未清洗，≈149M token）与 `近现代小说`/`翻译名著`/`轻小说`（≈14M，出版作品、授权链
   不清），`Miaowuawa/ChineseNovels` 补 ≈254M（整本一篇，不拆章只进每本前 200k 字符），池子 ≈1.59B。
-- **通识：瓶颈在参数量**。知识桶 1.425B token（26.4%）：百度百科 parquet 分支实测 1.73M 条 / 1.92B 字符
-  ≈ **1.34B token**（全量读一遍，连按"常见词 → 冷门实体"排序的尾部一起），萌娘百科清洗后 ≈82M。
+- **通识：瓶颈在参数量**。知识桶 allocate 1.225B token（22.7%）：百度百科 parquet 分支实测 1.73M 条 /
+  1.92B 字符 ≈ **1.34B token**（按常见实体优先读，尾部不读），萌娘百科清洗后 ≈82M。
   **"通识内容会不会太少"的答案不在数据侧**：
   116.65M 参数能存下的事实本来就有限，超过容量后不同事实还会互相干扰（同一批权重塞进更多事实，
   反而压低已记住那些的召回）。按性价比排序，真正能改善通识的四件事：
@@ -90,7 +101,7 @@
   2. **提事实密度而不是提量**：百度百科是短条目，比论述型长条目更贴近"一句话把事实说清楚"的形态；
      改用 `title+summary` 取字段能把每 token 的事实密度再抬一截（中位字数见 [datasets.md §1.5](datasets.md)）。
   3. **课程安排**：知识桶更多地压进 WSD 衰减阶段，晚期上采样的事实留存优于全程均匀铺开。当前配方里
-     百科在退火段占 28.4%（阶段 B 是 28.3%），但不是大比例过采样——退火段只有 1.08B。
+     百科在退火段占 23.5%。
   4. **形态差归 SFT**：目标行为是"闲聊里顺口答一句常识"，百科是论述文体。这个形态差要靠 SFT 补（简短、
      口语、不确定就说不知道），不是预训练再加几百 M token 能解决的。
 - **清洗**：分词型语料必须去空格——`silver/lccc` 的 `dialog` 直接用会让模型学着在汉字之间输出空格，
@@ -99,26 +110,32 @@
 - **语料盘点**：字符→token 按 0.7 tok/char（中文）/ 0.25（英文）估算（32k BPE、中文为主，±20%），
   真实值以 `prepare_data` 输出的 `train_tokens` 为准；下表是本地快照的实测字符数与由此得到的池子。
 
-  | 桶 | 全程 token | 池子（实测，200k 字符/篇截断后） | 实际遍数 |
+  | 桶 | 池子（实测，200k 字符/篇截断后） | allocate | 实读 |
   |---|---|---|---|
-  | chat（中文） | 1.010B | **1.010B**（LCCC base+large 453M + 字幕有效 428M + b-corpus `v-corpus-zh` 130M） | **1.00** |
-  | en_chat | 810M | 810M（soda 191M + 真人小集 17M + b-corpus 52M + TinyStoriesV2 550M） | 1.00 |
-  | fiction（网文） | 1.593B | 1.593B（webnovel 1.176B + 互动小说 149M + 近现代/翻译/轻小说 14M + ChineseNovels 254M） | 1.00 |
-  | long | 527M | 527M（知乎 506M + b-corpus 21M） | 1.00 |
-  | wiki | 1.425B | 1.425B（百度百科 1.343B + 萌娘百科 ≈82M） | **1.00** |
-  | roleplay（persona 卡片） | 17.2M | 17.2M（shibing624 1.5M + Johnson8187 10.3M + `q-corpus` 2.2M + LooksJuicy 3.3M） | 1.00 |
-  | roleplay_char（小说角色） | 5.1M | 5.1M（ChatHaruhi 对白 3.5M + b-corpus 1.6M） | 1.00 |
-  | roleplay_catgirl（猫娘） | 0.15M | 0.15M（kxdw2580 v2，去掉 `<think>` 后） | 1.00 |
+  | chat（中文） | **1.010B**（LCCC base+large 453M + 字幕有效 428M + b-corpus `v-corpus-zh` 130M） | 1.212B | **1.20 遍** |
+  | en_chat | 810M（soda 191M + 真人小集 17M + b-corpus 52M + TinyStoriesV2 550M） | 810M | 1.00 遍 |
+  | fiction（网文） | 1.593B（webnovel 1.176B + 互动小说 149M + 近现代/翻译/轻小说 14M + ChineseNovels 254M） | 1.593B | 1.00 遍 |
+  | long | 527M（知乎 506M + b-corpus 21M） | 527M | 1.00 遍 |
+  | wiki | 1.425B（百度百科 1.343B + 萌娘百科 ≈82M） | 1.225B | **0.86 遍** |
+  | roleplay（persona 卡片） | 17.2M（shibing624 1.5M + Johnson8187 10.3M + `q-corpus` 2.2M + LooksJuicy 3.3M） | 17.2M | 1.00 遍 |
+  | roleplay_char（小说角色） | 5.1M（ChatHaruhi 对白 3.5M + b-corpus 1.6M） | 5.1M | 1.00 遍 |
+  | roleplay_catgirl（猫娘） | 0.15M（kxdw2580 v2，去掉 `<think>` 后） | 0.15M | 1.00 遍 |
 
-  合计：**预算 5.39B = 池子之和**，实际消耗 5.39B、重复 0，没有哪个桶被 cap 截断；chat（1.01B，18.7%）
-  仍是最紧的一环。
+  合计：**预算 5.39B = allocate 之和**；唯一被重复的是 chat（+202M），唯一没读完的是 wiki（−200M）。
 - **序列**：阶段 A 用 **2048** 训长文，B / C 用 1024（IM 对话天然短）。把多个会话拼进同一条序列时仍用
   `<|endoftext|>` 分隔，并尽量让一条序列 = 一个完整会话，模型才能看到会话边界。2048 不需要位置缩放
   （`max_position_embeddings=4096`、`rope_theta=1e6`），代价也几乎为零：8 GB 卡上 seq 2048 × mb 2 与
   seq 1024 × mb 2 的吞吐、显存同档（见 `scripts/run_pipeline.sh` 步骤 2 的实测表）。
 - **优化器**：AdamW（β=0.9/0.95，wd=0.1，不对 norm/bias/嵌入/`A_log`/`dt_bias` 做衰减），梯度裁剪 1.0。
-- **学习率**：峰值 1e-3，2% warmup，**WSD 调度**（稳定 → 最后 20% 线性降到 10%），中途任意 checkpoint 都能接着延长训练。若 `gnorm` 经常尖峰，降到 6e-4。三段课程是三个 `--resume` run，有两条约定：`--tokens` 是**该 run 的累计**目标（1.21e9 → 4.31e9 → 5.39e9），中间段加 `--decay_frac 0` 把调度压成常数 lr，只有最后一段真衰减——而它的衰减起点正好是退火段的起点（0.8 × 5.39B = 4.31B），三段接起来仍是一条 warmup → 恒定 → 衰减的完整曲线。
-- **MTP**：主体阶段权重 0.3，最后衰减阶段切到 0.1（`--mtp_weight_final 0.1`），切换点与退火段的起点重合（`--decay_frac 0` 的中间段不会触发它）。
+- **学习率**：峰值 1e-3，2% warmup，**一条以 token 为轴的全局 WSD**（恒定 → 最后 20% 线性降到 10%）。三段是三次
+  `--resume` run，但调度由配方统一计算（`lr_at_tokens`：`tokens_done / budget_tokens`），不需要"中间段
+  `--decay_frac 0`、累计 `--tokens`"这套手写约定，衰减起点天然落在退火段起点（0.8 × 5.39B = 4.31B）。
+  若 `gnorm` 经常尖峰，把配方里的 `schedule.peak_lr` 降到 6e-4；监控的受控回退也会在尖峰时临时压 lr
+  （见 [monitoring.md](monitoring.md)）。
+- **MTP**：主体阶段权重 0.3，最后衰减阶段切到 0.1（配方 `mtp_weight_final`），切换点与退火段起点重合。
+- **监控**：每次 run 同时写 `metrics.jsonl` 与 `health.jsonl`，`python tools/watch_training.py --dir
+  runs/pretrain` 实时看指标、进度、tok/s、ETA 与告警；异常判定与受控干预（lr 回退、可选早停）见
+  [monitoring.md](monitoring.md)。
 
 ## 3. 阶段 2：视觉对齐（可选）
 
@@ -164,8 +181,13 @@
 - 全部参数可训练，ViT 学习率为 LLM 的 0.5 倍（跳过 align 时用 `--train llm`）；
   lr 1e-4–2e-4（基座没有任何指令数据时取 2e-4；数据少、担心过拟合取 1e-4），warmup 3%，
   1–3 个 epoch，MTP 权重 0.1，seq_len 1024（会话语料普遍超长时用 2048）。
+- **`--mm_weights` 是配比旋钮**：`ChatDataset` 把 `--mm_data` 的各项拼成一个 offsets 列表，不给权重时
+  谁的行数多谁说了算（一个 500 行的拒答集在 100 万行闲聊旁边等于不存在）。给了权重就按目标比例采样，
+  小于目标份额的源会被重复到那个份额——§4.4 的 2–8% 由此变成一个可执行的数字，而不是人工数行数。
+  配方里的 74% / 21% / 5% 见 `configs/pretrain_plan.json` 的 `sft.mix_weights`。
 - **务必混入纯文本对话数据**：本定位下纯文本应占 ≥ 70%，可选的对话内图像数据不超过 30%；否则文本对话能力会退化成"看图说话"。
-- 数据量小时优先加数据多样性，而不是加 epoch；用 §6 的验证集监控过拟合。
+- 数据量小时优先加数据多样性，而不是加 epoch；用 §6 的验证集监控过拟合，并给
+  `--early_stop_patience`（例如 4）让监控在验证集不再改善时停下（见 [monitoring.md](monitoring.md)）。
 
 ### 4.3 身份与"像人"的行为
 
@@ -237,7 +259,8 @@ python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/fiction --ma
 # 长文桶就是知乎的全部（0.72B 字符 ≈ 0.51B token，一遍）：
 python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/long --max_tokens 530000000 --val_tokens 2000000 \
     --source "hf:wangrui6/Zhihu-KOL:RESPONSE:default:train"
-python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/wiki --max_tokens 1450000000 --val_tokens 2500000 \
+# wiki 的 cap 按配方的 allocate 给（1225.5M + val），不是池子：百度百科按常见词→冷门实体排序，尾部 200M 不读
+python scripts/prepare_data.py --tokenizer tokenizer --out data/bin/wiki --max_tokens 1228050000 --val_tokens 2500000 \
     --source "parquet:hf://datasets/lars1234/baidu-baike-dataset@refs/convert/parquet/default/partial-train/*.parquet:-"  # 简体白话百科 ≈1.34B token
     --source "jsonl:data/wiki/*.jsonl:text"                         # 萌娘百科清洗产物，≈82M token
 # 萌娘百科（mrzjy/chinese_moegirl_wiki_corpus_raw）是原始 wikitext，要先剥模板/表格/注释再落成上面的
@@ -255,31 +278,34 @@ python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/
 python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/roleplay_catgirl --max_tokens 180000 --val_tokens 20000 \
     --source "jsonl:data/roleplay_catgirl/*.jsonl:text"
 
-# 2. 预训练：三段课程（配比与理由见 §2）。三次 run 写同一个 --out_dir，后一段从 runs/pretrain/last 续；
-#    --tokens 是**累计**目标（1.21e9 → 4.31e9 → 5.39e9），中间段用 --decay_frac 0 保持恒定 lr，
-#    只有退火段衰减，而它的衰减起点正好落在 4.31e9 这一步上（5.39B 的最后 20%）。
-#    权重不是手写的：跑完步骤 1 后用 tools/plan_mix.py 读各桶 meta.json，按池子把每个桶摊到三段
-#    （A 只放长文三桶，C 按 chat/role-play 配比，B 拿剩下的），预算 = 池子之和，所以每个桶各读一遍：
-python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
-    --data data/bin/fiction:0.45,data/bin/long:0.35,data/bin/wiki:0.20 \
-    --tokens 1.21e9 --seq_len 2048 --decay_frac 0 --resume
-python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
-    --data data/bin/chat:0.2079,data/bin/en_chat:0.2490,data/bin/fiction:0.2408,data/bin/long:0.0193,data/bin/wiki:0.2830 \
-    --tokens 4.31e9 --seq_len 1024 --decay_frac 0 --resume
-python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
-    --data data/bin/chat:0.3396,data/bin/en_chat:0.0360,data/bin/fiction:0.2797,data/bin/long:0.0400,data/bin/wiki:0.2839,data/bin/roleplay:0.0159,data/bin/roleplay_char:0.0047,data/bin/roleplay_catgirl:0.0001 \
-    --tokens 5.39e9 --seq_len 1024 --resume
+# 2. 预训练：三段课程（配比与理由见 §2）。先把配方解析成可执行文件，再按段跑：
+python tools/plan_mix.py --plan configs/pretrain_plan.json \
+    --write runs/pretrain/plan.resolved.json --print-commands
+#    这一步读各桶 meta.json 的 train_tokens，按 allocate 把每个桶摊到三段（A 只放长文三桶，C 按
+#    chat / role-play 目标配比，B 拿剩下的），权重与 --tokens 都写进 plan.resolved.json。
+#    三次 run 写同一个 --out_dir，后一段从 runs/pretrain/last 续；--tokens、形状、配比与 lr 全部来自配方，
+#    学习率是一条以 token 为轴的全局 WSD（2% warmup → 恒定 → 最后 20% 衰减），不需要手写 --decay_frac 0：
+python scripts/train.py --stage pretrain --plan runs/pretrain/plan.resolved.json --phase A \
+    --tokenizer tokenizer --out_dir runs/pretrain --compile --resume
+python scripts/train.py --stage pretrain --plan runs/pretrain/plan.resolved.json --phase B \
+    --tokenizer tokenizer --out_dir runs/pretrain --compile --resume
+python scripts/train.py --stage pretrain --plan runs/pretrain/plan.resolved.json --phase C \
+    --tokenizer tokenizer --out_dir runs/pretrain --compile --resume
+# 训练期间实时看指标与告警（细节见 doc/monitoring.md）：
+#   python tools/watch_training.py --dir runs/pretrain
 
 # 3.（可选）视觉对齐
-python scripts/train.py --stage align --tokenizer tokenizer --init_from runs/pretrain/final \
-    --out_dir runs/align --mm_data data/mm/chat_image.jsonl --image_root data/mm/images --epochs 1 --resume
+python scripts/train.py --stage align --plan runs/pretrain/plan.resolved.json --phase align \
+    --tokenizer tokenizer --init_from runs/pretrain/final \
+    --out_dir runs/align --mm_data data/mm/chat_image.jsonl --image_root data/mm/images --resume
 
 # 4. 对话 / 角色扮演 SFT：人类对话 + 人设 + 少量越界拒答
 #    跳过视觉对齐时：--init_from runs/pretrain/final --train llm（数据须为纯文本）
-python scripts/train.py --stage sft --tokenizer tokenizer \
-    --init_from runs/align/final --out_dir runs/sft --train llm \
+#    --mm_weights 是配比旋钮：三项分别占 74% / 21% / 5%，不给就是"谁行数多谁说了算"
+python scripts/train.py --stage sft --plan runs/pretrain/plan.resolved.json --phase sft \
+    --tokenizer tokenizer --init_from runs/align/final --out_dir runs/sft \
     --mm_data data/sft/human_dialog.jsonl,data/sft/persona.jsonl,data/sft/refuse.jsonl \
-    --epochs 2 --lr 2e-4 --resume
+    --mm_weights 0.74,0.21,0.05 --desegment --resume
 
 # 同一个 SFT 阶段也可以直接吃 HF 数据源，不用先落 jsonl：
 # LCCC 走转换后的 parquet 分支，并且要 --desegment：
@@ -322,7 +348,7 @@ python scripts/train.py --stage sft --tokenizer tokenizer \
   | fiction | webnovel-chinese | 3.16 GB | 3.16 GB（全要） |
   | fiction | Miaowuawa/ChineseNovels | 0.62 GB | 全要（拆章后 ≈0.25B token） |
   | long | Zhihu-KOL | 1.50 GB | 1.50 GB（全要） |
-  | wiki | baidu-baike（parquet） | 3.21 GB | 3.21 GB（全要，全池一遍） |
+  | wiki | baidu-baike（parquet） | 3.21 GB | ~2.8 GB（按 allocate 读到常见实体为止） |
   | wiki | 萌娘百科（原始 wikitext） | 0.30 GB | 全要（清洗后写 `data/wiki/`，token 重测） |
   | roleplay | 三个集 | 0.09 GB | 全要 |
   | roleplay_char | ChatHaruhi-54K | 0.03 GB | 全要（对白 ~3.5M token） |
@@ -334,7 +360,7 @@ python scripts/train.py --stage sft --tokenizer tokenizer \
   英文桶 SODA 在前、真人小集在后（cap 高于两者之和，谁都不会被截）。
   另外：分片粒度会让实际值偏高（LCCC / soda / 网文每片 300+ MB）。`baidu-baike` 优先走 parquet 分支：
   3.2 GB vs 原始单文件 json 16.8 GB。
-  派生出的 token 分片（`data/bin/*`，uint16 即 2 B/token）再占 **~10.8 GB**（池子 ≈5.39B token）；
+  派生出的 token 分片（`data/bin/*`，uint16 即 2 B/token）再占 **~10.6 GB**（allocate 之和 ≈5.39B token）；
   加 `last/`（~1.6 GB 优化器状态）与各阶段 `final/`，一次完整三阶段训练合计约 **28 GB**。
   `--mm_data` 的远程来源会在 `--mm_cache` 另落一份 jsonl 缓存。
   ⚠️ **`hf:` 流式读取不是"不落盘"**：下载的 parquet 会留在 HF 缓存里（本机实测
@@ -382,4 +408,8 @@ python scripts/train.py --stage sft --tokenizer tokenizer \
 | `--schedule cosine` / `--decay_frac` / `--min_lr_ratio` | 调度器选择与衰减比例 |
 | `--resume` | 从 `out_dir/last` 续训，含数据顺序与 GradScaler 状态 |
 | `--eval_every` / `--eval_batches` / `--save_every` / `--log_every` | 验证频率与批次、保存与日志频率 |
+| `--plan` / `--phase` | 读 `tools/plan_mix.py` 解析出的配方：形状、配比、`--tokens` 与以 token 为轴的全局 WSD |
+| `--mm_weights` | align/sft：每个 `--mm_data` 项的采样权重（不给则按行数） |
+| `--no_monitor` / `--no_intervention` | 关掉指标流 / 保留告警但不自动回退与早停 |
+| `--early_stop_patience` / `--spike_sigma` / `--lr_backoff` / `--backoff_steps` | 监控阈值与受控干预，见 [monitoring.md](monitoring.md) |
 | `--precision` / `--gdn_impl` / `--grad_ckpt` / `--ce_ckpt` / `--compile` / `--tf32` | 精度与 kernel |

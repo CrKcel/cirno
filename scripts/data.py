@@ -101,23 +101,32 @@ class ChatDataset(Dataset):
     """Chat records: {"messages": [{"role","content"}], "image": "rel/path.jpg" (optional)}.
 
     Local jsonl files are read in place; remote / glob sources (`hf:`, `parquet:`, `jsonl:<glob>`, see
-    common_io.py) are spooled into `cache_dir` first.  Images are loaded lazily; unusable records (unknown
-    role, missing image, truncated image block, ...) are skipped by falling through to the next record."""
+    common_io.py) are spooled into `cache_dir` first, one file per source so a source keeps its own row
+    count (that is what `--mm_weights` mixes).  Images are loaded lazily; unusable records (unknown role,
+    missing image, truncated image block, ...) are skipped by falling through to the next record.
+
+    `set_mix(weights, planned_samples)` folds a mixture into the dataset: the sample index then walks a
+    deterministic weighted schedule instead of the raw concatenation, so an SFT slice's share of the
+    epochs is a parameter rather than whatever its line count happens to be."""
 
     def __init__(self, sources, image_root, tokenizer, max_len, vision_cfg, token_ids, cache_dir="data/cache",
                  desegment=False):
-        self.files = [s for s in sources if not is_source_spec(s)]
-        specs = [s for s in sources if is_source_spec(s)]
-        if specs:
-            self.files.append(spool(specs, cache_dir))
+        self.sources = list(sources)
+        self.files = [spool([s], cache_dir) if is_source_spec(s) else s for s in self.sources]
         self.offsets = []  # (file index, byte offset)
+        self.counts = []
         for fi, p in enumerate(self.files):
+            start = len(self.offsets)
             with open(p, "rb") as f:
                 off = 0
                 for line in f:
                     if line.strip():
                         self.offsets.append((fi, off))
                     off += len(line)
+            self.counts.append(len(self.offsets) - start)
+        self.counts = np.asarray(self.counts, dtype=np.int64)
+        self.schedule = None  # int32 positions into self.offsets once set_mix() has been called
+        self.mix_weights = None
         self.root = image_root
         self.tok = tokenizer
         self.max_len = max_len
@@ -126,13 +135,28 @@ class ChatDataset(Dataset):
         self.desegment = desegment  # LCCC-style word-segmented turns (see common_io.desegment_cjk)
         self.skipped = 0
 
+    def set_mix(self, weights, planned_samples, seed=0):
+        from hvlm.data_core import weighted_schedule
+
+        if len(weights) != len(self.sources):
+            raise ValueError(f"{len(weights)} weights for {len(self.sources)} sources")
+        self.mix_weights = [float(w) for w in weights]
+        self.schedule = weighted_schedule(self.counts, self.mix_weights, int(planned_samples), seed)
+
+    def source_counts(self):
+        rows = [int(c) for c in self.counts]
+        weights = self.mix_weights or [1.0] * len(rows)
+        return list(zip(self.sources, weights, rows))
+
     def __len__(self):
-        return len(self.offsets)
+        return len(self.schedule) if self.schedule is not None else len(self.offsets)
 
     def _encode(self, s):
         return self.tok(desegment_cjk(s) if self.desegment else s, add_special_tokens=False)["input_ids"]
 
     def _load(self, idx):
+        if self.schedule is not None:
+            idx = int(self.schedule[idx])
         fi, off = self.offsets[idx]
         with open(self.files[fi], "rb") as f:
             f.seek(off)

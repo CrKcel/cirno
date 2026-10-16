@@ -1,7 +1,8 @@
 """Hybrid (Gated DeltaNet + Gated Attention) vision-language model, ~130M parameters.
 
 Importing the package does not import torch/transformers, so the numpy-only helpers
-(`hvlm.positions`) can be used and tested anywhere.  Model classes are loaded lazily.
+(`hvlm.positions`, `hvlm.data_core`, `hvlm.monitor`) can be used and tested anywhere.  Model classes are
+loaded lazily.
 """
 
 __all__ = ["HVLMConfig", "HVLMVisionConfig", "HVLMForConditionalGeneration", "register"]

@@ -34,8 +34,34 @@ assert src.count(",") == 1, f"prepare_data --source is not appendable any more: 
 EOF
 step 4-pretrain  "$PY" scripts/train.py --stage pretrain --tokenizer "$WORK/tok" --out_dir "$WORK/pretrain" \
     --data "$WORK/bin" --max_steps 3 --seq_len 512 --micro_batch 4 --grad_accum 2 --log_every 1 --workers 0
+# The monitoring contract: every run writes metrics.jsonl + health.jsonl, and the dashboard reads them
+# back.  A regression here (renamed stream, unreadable JSONL) is invisible in the loss line above.
+"$PY" - "$WORK/pretrain" <<'EOF'
+import json, os, subprocess, sys
+d = sys.argv[1]
+metrics = [json.loads(line) for line in open(os.path.join(d, "metrics.jsonl")) if line.strip()]
+assert metrics, "metrics.jsonl is empty"
+assert any("loss" in m and "step" in m for m in metrics), metrics
+assert os.path.exists(os.path.join(d, "health.jsonl")), "health.jsonl missing"
+out = subprocess.run([sys.executable, "tools/watch_training.py", "--dir", d, "--once", "--no-color"],
+                     capture_output=True, text=True, check=True).stdout
+assert "loss" in out and "step 3/3" in out, out
+print("  monitoring: metrics.jsonl, health.jsonl and the dashboard all agree")
+EOF
 drop() { [ -n "${KEEP:-}" ] || rm -rf "$@"; }
 drop "$WORK/pretrain/last"
+# The intervention path has to reach health.jsonl, not just the policy's unit tests: an lr far outside the
+# stable range makes gradients non-finite, which must be reported and answered with a backoff.
+step 4b-alert    "$PY" scripts/train.py --stage pretrain --tokenizer "$WORK/tok" --out_dir "$WORK/alert" \
+    --data "$WORK/bin" --max_steps 2 --seq_len 512 --micro_batch 4 --grad_accum 2 --log_every 1 \
+    --workers 0 --lr 1e6 --backoff_steps 2
+"$PY" - "$WORK/alert" <<'EOF'
+import json, os, sys
+events = [json.loads(line) for line in open(os.path.join(sys.argv[1], "health.jsonl")) if line.strip()]
+assert any(e["code"] == "nonfinite_gradient" and e["action"] == "lr_backoff" for e in events), events
+print("  monitoring: a diverging lr is detected, reported and backed off")
+EOF
+drop "$WORK/alert"
 step 5-align     "$PY" scripts/train.py --stage align --tokenizer "$WORK/tok" \
     --init_from "$WORK/pretrain/final" --out_dir "$WORK/align" --mm_data "$WORK/data/caps.jsonl" \
     --image_root "$WORK/data" --max_steps 2 --seq_len 512 --micro_batch 4 --grad_accum 2 --workers 0

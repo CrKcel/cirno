@@ -62,10 +62,11 @@ cd "$(dirname "$0")/.."
 #     7z parts - `parquet:hf://datasets/mrzjy/Chinese_interactive_novels_3k@refs/convert/parquet/default/train/*.parquet:book_chapter`
 #     - and drop `content_tag`/`role` before writing, the field expression cannot.  00-preview/ and the
 #     per-work *.py are statistics and extractors, not corpora.
-#   With b-corpus, TinyStoriesV2, ChineseNovels, moegirl and LooksJuicy in, every bin's pool is larger than
-#   the --max_tokens in step 1, and those caps are the pre-addition values (EN already carries its raised
-#   860M, because its new first source is what a low cap would cut): raise each remaining one above its new
-#   pool, then re-derive the three --data strings of step 2 with tools/plan_mix.py from the new meta.json
+#   With b-corpus, TinyStoriesV2, ChineseNovels, moegirl and LooksJuicy in, a bin's pool grows past the
+#   `expected_tokens` recorded in configs/pretrain_plan.json (EN already carries its raised 860M cap,
+#   because its new first source is what a low cap would cut).  Update those estimates, raise the step-1
+#   --max_tokens of any bin the recipe now reads in full above its new pool, and re-run
+#   `tools/plan_mix.py --plan configs/pretrain_plan.json` against the fresh meta.json before training
 #   (doc/training.md 2).
 # The EN bucket exists because allenai/soda is large (measured: 1.2M conversations, mean 632 chars of
 # dialogue, ~191M tokens) - it is the only English set that can carry a weight.  It is synthetic
@@ -108,13 +109,17 @@ python scripts/train_tokenizer.py --out tokenizer --desegment \
     --source "$WIKI@34000" --source "$LONG@85000"
 
 # 1. tokenise each source separately so the mixture can be re-weighted without re-tokenising.
-#    The cap is a safety limit, not a budget: it sits at or above the bin's own token count, so the sources
-#    are read to the end and `train_tokens` in <out>/meta.json is the pool every phase samples from.  A cap
-#    that binds stops the bin mid-source, which is a corpus left untrained, not a mixture correction - the
-#    weights come from those pools (tools/plan_mix.py) and no bin is asked for more than it holds.
+#    The cap is a safety limit, not a budget: it sits at or above what the recipe allocates that bin, so
+#    `train_tokens` in <out>/meta.json is the pool every phase samples from.  A cap that binds stops the
+#    bin mid-source, which is a corpus left untrained, not a mixture correction - the weights come from
+#    those pools (tools/plan_mix.py) and no bin is asked for more than the recipe allocates it.
 #    EN is the one bin whose list order makes its cap load-bearing: TinyStoriesV2 is listed first and is
 #    ~550M tokens on its own, so the 860M below (the estimated ~810M pool plus headroom) is what keeps
 #    soda and the human-written sets from being cut off entirely.
+#    WIKI is capped below its pool on purpose: the recipe allocates it 1.226B of the 1.425B, because
+#    baidu-baike is ordered common entity -> rare entity and those 200M tokens are worth less to a 117M
+#    model than the chat replay they pay for (doc/training.md 2).  Re-derive every number with:
+#      python tools/plan_mix.py --plan configs/pretrain_plan.json
 python scripts/prepare_data.py --tokenizer tokenizer --desegment --source "$CHAT"     --out data/bin/chat     --max_tokens 1020000000 --val_tokens 4000000
 python scripts/prepare_data.py --tokenizer tokenizer             --source "$EN"       --out data/bin/en_chat  --max_tokens  860000000 --val_tokens 1000000
 python scripts/prepare_data.py --tokenizer tokenizer             --source "$FICTION"  --out data/bin/fiction  --max_tokens 1610000000 --val_tokens 2500000
@@ -122,61 +127,51 @@ python scripts/prepare_data.py --tokenizer tokenizer             --source "$LONG
 python scripts/prepare_data.py --tokenizer tokenizer --desegment --source "$ROLEPLAY" --out data/bin/roleplay         --max_tokens   18000000 --val_tokens 200000
 python scripts/prepare_data.py --tokenizer tokenizer --desegment --source "$CHAR"     --out data/bin/roleplay_char    --max_tokens    5200000 --val_tokens 100000
 python scripts/prepare_data.py --tokenizer tokenizer --desegment --source "$CATGIRL" --out data/bin/roleplay_catgirl --max_tokens     180000 --val_tokens  20000
-python scripts/prepare_data.py --tokenizer tokenizer             --source "$WIKI"     --out data/bin/wiki     --max_tokens 1450000000 --val_tokens 2500000
+python scripts/prepare_data.py --tokenizer tokenizer             --source "$WIKI"     --out data/bin/wiki     --max_tokens 1228050000 --val_tokens 2500000
 
-# 2. text pre-training: 5.39B tokens in three phases, dialogue-dominant mixture (doc/training.md 2).  The
-#    mixture is a schedule, not a constant: phase A spends the first 1.21B on long-form only at seq 2048,
-#    phase B brings dialogue in for 3.10B, phase C decays on chat + role-play for the last 1.08B.  The budget
-#    is the sum of the bins' pools and the weights come from the same pools (tools/plan_mix.py), so every bin
-#    is read exactly once - chat 1.01B, en_chat 810M, fiction 1.59B, long 527M, wiki 1.43B, role-play 22.5M -
-#    with no repeats and no corpus left behind a cap.  The ordering is what keeps the long-form tokens from
-#    diluting the chat style: chat starts in B and the last 1.08B is 34% chat + 2.1% role-play.
-#    Everything else uses the fast path: --precision auto (bf16 on Ampere+, else fp16 + GradScaler),
-#    --gdn_impl auto (flash-linear-attention Triton kernels once `pip install flash-linear-attention` has
-#    been run) and --grad_ckpt auto / --ce_ckpt auto, which probe the configured shape once and skip both
-#    activation checkpointing and the CE's head-matmul recompute when they fit (~1.6x together).  micro_batch
-#    is therefore kept small: what matters is that a micro-batch fits WITHOUT checkpointing, and
-#    --grad_accum makes up 524k tokens per step in every phase.
-#    Measured on an 8 GB card at 524k tokens/step (doc/architecture.md 3.2, absolute numbers differ per session):
+# 2. text pre-training: configs/pretrain_plan.json is the recipe, and plan_mix.py is what turns it into
+#    runnable phases.  The mixture is a schedule, not a constant - phase A spends the first 1.21B on
+#    long-form only at seq 2048, phase B brings dialogue in for 3.10B, phase C decays on chat + role-play
+#    for the last 1.08B - and the weights come out of the bins' measured pools, so they are derived
+#    rather than typed.  chat is the one bin read more than once (allocate 1.212B for a 1.010B pool):
+#    the replay is what lifts dialogue from 34% to 37.5% of the budget, and it is concentrated in the
+#    anneal where the last gradients pick the style (doc/training.md 2).
+#    --print-commands also emits the align / SFT lines below.
+python tools/plan_mix.py --plan configs/pretrain_plan.json --write runs/pretrain/plan.resolved.json --print-commands
+
+#    Each phase is a separate run into the SAME --out_dir, so B and C pick up runs/pretrain/last and keep
+#    the optimizer, the sample counter and the data order.  --tokens, the phase boundary, the mixture and
+#    the shape all come from the resolved plan, and the learning rate is one WSD curve over the whole
+#    5.39B tokens (warmup 2%, flat middle, final 20% decay), so there is no --decay_frac 0 bookkeeping
+#    and no hand-maintained cumulative token count to get wrong.
+#    Measured on an 8 GB card at 524k tokens/step (doc/architecture.md 3.2, absolute numbers differ per
+#    session):
 #       mb16 x accum32   seq 1024         6938 tok/s   3.9 GB
 #       mb2  x accum256  seq 1024        13042 tok/s   5.1 GB   <- phases B and C
 #       mb4  x accum128  seq 1024 --compile  18143 tok/s   5.2 GB
-#       mb2  x accum128  seq 2048         4785 tok/s   2.8 GB   <- phase A (probe turns checkpointing on;
-#                                                                  with it off this shape OOMs).  Per token
-#                                                                  this is the same cost as seq 1024 x mb 2
-#                                                                  (4575 tok/s), i.e. 2048 is nearly free.
+#       mb2  x accum128  seq 2048         4785 tok/s   2.8 GB   <- phase A (the probe turns
+#                                                                  checkpointing on; with it off this
+#                                                                  shape OOMs).  Per token this is the same
+#                                                                  cost as seq 1024 x mb 2 (4575 tok/s),
+#                                                                  i.e. 2048 is nearly free.
 #    Re-measure with:
 #      python tools/measure_batch.py --stage pretrain [--gdn_impl fla|torch] [--precision bf16|fp16|fp32]
 #                                    [--no_grad_ckpt] [--compile]
-#    Each phase is a separate run into the SAME --out_dir, so B and C pick up runs/pretrain/last and keep
-#    the optimizer, the sample counter and the data order.  Two things to know before editing:
-#      * --tokens is the CUMULATIVE target of the run, not the length of this phase: A passes 1.21e9, B
-#        passes 4.31e9 (= 1.21 + 3.10), C passes 5.39e9.  All three use 524k tokens/step, so the step counter
-#        lines up across runs (2311 / 8220 / 10274 steps) and C's decay starts exactly where C starts
-#        (5.39B - 20% = 4.31B).
-#      * --decay_frac 0 on A and B keeps the WSD schedule flat at the peak lr for an intermediate phase
-#        (it also holds --mtp_weight_final off, which is what phase C is for).
-#    Weights are derived, not chosen: tools/plan_mix.py reads the bins' `train_tokens` and splits each
-#    whole pool over the three phases, so a weight can never exceed what the bin holds.  chat's pool is
-#    1.01B, so its share of B is 20.8% - reading it at the decay-phase share (34%) in both B and C would
-#    make it 1.5 passes.  role-play's 22.5M tokens appear ONLY in the decay phase (2.1% of it), so each of
-#    the three small bins is read once; re-run plan_mix after prepare_data, since ChineseNovels and moegirl
-#    are estimated pools and may move the sum.  TokenMixer normalises the weights, so only their ratios
-#    matter.
-python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
-    --data data/bin/fiction:0.45,data/bin/long:0.35,data/bin/wiki:0.20 \
-    --tokens 1.21e9 --seq_len 2048 --micro_batch 2 --grad_accum 128 --lr 1e-3 --decay_frac 0 \
-    --mtp_weight 0.3 --compile --resume
+python scripts/train.py --stage pretrain --plan runs/pretrain/plan.resolved.json --phase A \
+    --tokenizer tokenizer --out_dir runs/pretrain --compile --resume
+python scripts/train.py --stage pretrain --plan runs/pretrain/plan.resolved.json --phase B \
+    --tokenizer tokenizer --out_dir runs/pretrain --compile --resume
+python scripts/train.py --stage pretrain --plan runs/pretrain/plan.resolved.json --phase C \
+    --tokenizer tokenizer --out_dir runs/pretrain --compile --resume
 
-python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
-    --data data/bin/chat:0.2079,data/bin/en_chat:0.2490,data/bin/fiction:0.2408,data/bin/long:0.0193,data/bin/wiki:0.2830 \
-    --tokens 4.31e9 --seq_len 1024 --micro_batch 2 --grad_accum 256 --lr 1e-3 --decay_frac 0 \
-    --mtp_weight 0.3 --compile --resume
-
-python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
-    --data data/bin/chat:0.3396,data/bin/en_chat:0.0360,data/bin/fiction:0.2797,data/bin/long:0.0400,data/bin/wiki:0.2839,data/bin/roleplay:0.0159,data/bin/roleplay_char:0.0047,data/bin/roleplay_catgirl:0.0001 \
-    --tokens 5.39e9 --seq_len 1024 --micro_batch 2 --grad_accum 256 --lr 1e-3 --mtp_weight 0.3 \
-    --mtp_weight_final 0.1 --compile --resume
+#    Every run also writes metrics.jsonl + health.jsonl next to log.jsonl; watch it live, or take one
+#    snapshot for a log, with:
+#      python tools/watch_training.py --dir runs/pretrain
+#      python tools/watch_training.py --dir runs/pretrain --once
+#    Defaults are alert-and-correct: a loss or grad-norm spike halves the lr for up to a twentieth of the
+#    run, sustained throughput loss and memory pressure are reported, and --early_stop_patience N turns
+#    "N evaluations without a new best val loss" into a stop.  --no_intervention keeps the alerts only;
+#    doc/monitoring.md has the thresholds.
 
 # 3. (optional) vision alignment: only when the deployment really sees images (stickers / memes /
 #    chat screenshots).  LLM frozen, ViT + projector learn from IN-CONVERSATION images, not academic
@@ -184,12 +179,16 @@ python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pr
 #    text-only chat model and point step 4 at runs/pretrain/final instead.
 #    Open image-chat sets keep their images inside the dataset, so they still have to be exported to
 #    --image_root by hand; this line expects an already-written jsonl.
-python scripts/train.py --stage align --tokenizer tokenizer --init_from runs/pretrain/final --out_dir runs/align \
-    --mm_data data/mm/chat_image.jsonl --image_root data/mm/images --epochs 1 --micro_batch 8 --grad_accum 32 --resume
+python scripts/train.py --stage align --plan runs/pretrain/plan.resolved.json --phase align \
+    --tokenizer tokenizer --init_from runs/pretrain/final --out_dir runs/align \
+    --mm_data data/mm/chat_image.jsonl --image_root data/mm/images --resume
 
 # 4. dialogue / role-play SFT: human-to-human conversations + personas + a small out-of-scope refusal
 #    set ("I don't know, ask an AI").  Only the imitated side (the `self` role in the encoder)
 #    is scored; `--train llm` matches the text-only path (use runs/pretrain/final if step 3 was skipped).
+#    --mm_weights is what turns the recipe's 74 / 21 / 5 slice into an actual mixture: without it a
+#    source's share of the batches is whatever its line count happens to be, which is how a 500-row
+#    refusal set disappears next to a million-row chat dump.
 #    --mm_data takes source specs too, and remote ones are spooled into --mm_cache (data/cache) once.
 #    LCCC comes through its converted parquet branch and needs --desegment here as well, or the SFT
 #    targets are word-segmented:
@@ -197,8 +196,9 @@ python scripts/train.py --stage align --tokenizer tokenizer --init_from runs/pre
 #    LooksJuicy/Chinese-Roleplay-SingleTurn can join SFT too, but rename its `instruction` to
 #    `system_prompt` when writing the jsonl, or the card repeats in every user turn (doc/datasets.md 1.6).
 #    The refusal slice (2-8%) has no off-the-shelf source: write it yourself per doc/training.md 4.4.
-python scripts/train.py --stage sft --tokenizer tokenizer --init_from runs/align/final --out_dir runs/sft \
-    --train llm --mm_data data/sft/human_dialog.jsonl,data/sft/persona.jsonl,data/sft/refuse.jsonl --desegment --epochs 2 \
-    --micro_batch 8 --grad_accum 16 --resume
+python scripts/train.py --stage sft --plan runs/pretrain/plan.resolved.json --phase sft \
+    --tokenizer tokenizer --init_from runs/align/final --out_dir runs/sft \
+    --mm_data data/sft/human_dialog.jsonl,data/sft/persona.jsonl,data/sft/refuse.jsonl \
+    --mm_weights 0.74,0.21,0.05 --desegment --resume
 
 python scripts/sample.py --model runs/sft/final --prompt "在吗" --max_new_tokens 32

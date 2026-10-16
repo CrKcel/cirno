@@ -6,20 +6,24 @@ in Python/PyTorch, positioned as an **on-device chat / role-play model** rather 
 ## Project Structure & Module Organization
 
 - `hvlm/` — model package. `modeling_hvlm.py` holds the model, ViT, MTP block, and chunked CE;
-  `gated_delta.py` the delta rule and kernel dispatch; `configuration_hvlm.py` the configs.
-  `positions.py` and `data_core.py` are numpy-only and must stay importable without torch.
+  `gated_delta.py` the delta rule and kernel dispatch; `configuration_hvlm.py` the configs;
+  `monitor.py` the training-health policy and the metric/event streams.
+  `positions.py`, `data_core.py` and `monitor.py` are numpy-only and must stay importable without torch.
 - `scripts/` — CLI entry points: `train_tokenizer.py`, `prepare_data.py`, `train.py`, `sample.py`,
   plus the `smoke_test.sh` and `run_pipeline.sh` orchestration scripts.
 - `tools/` — standalone estimators and checks: `estimate.py`, `measure_batch.py`,
-  `check_algorithms_numpy.py`, `check_data_numpy.py`, `make_synthetic.py`, `plan_mix.py` (derives the
-  three phase mixes from the bins' `meta.json`).
+  `check_algorithms_numpy.py`, `check_data_numpy.py`, `check_monitor.py`, `make_synthetic.py`,
+  `plan_mix.py` (resolves `configs/pretrain_plan.json` against the bins' `meta.json` into the runnable
+  `plan.resolved.json`), `watch_training.py` (terminal dashboard over the metric streams).
 - `tests/` — `test_model.py`, the torch test suite.
-- `configs/` — `hvlm_130m.json` model config. `data/` and `runs/` hold generated artifacts and are
-  gitignored.
+- `configs/` — `hvlm_130m.json` model config and `pretrain_plan.json`, the training recipe (phase
+  budgets, shapes, per-bin token allocations, mixture targets). `data/` and `runs/` hold generated
+  artifacts and are gitignored.
 - `doc/` — the long-form docs: `architecture.md` (model design, parameter count, memory and
   throughput, precision/kernel choices), `training.md` (design positioning, the three training
   stages, data prep, evaluation, edge inference, training flags), `datasets.md` (which open datasets
-  each stage points at, their source specs, licences and caveats), `progress.md` (what is done, known
+  each stage points at, their source specs, licences and caveats), `monitoring.md` (metric streams,
+  dashboard, health thresholds and the controlled interventions), `progress.md` (what is done, known
   limitations, TODO). Keep them in sync with the code.
 
 `hvlm/__init__.py` loads model classes lazily; keep torch imports out of `positions.py` and
@@ -32,7 +36,9 @@ pip install -r requirements.txt
 pip install flash-linear-attention          # optional CUDA Triton kernels for Gated DeltaNet
 python tools/check_algorithms_numpy.py      # chunked delta rule vs recurrence, M-RoPE (no torch)
 python tools/check_data_numpy.py            # data pipeline (no torch)
+python tools/check_monitor.py               # health policy, metric streams, dashboard, recipe (no torch)
 python tools/estimate.py configs/hvlm_130m.json
+python tools/plan_mix.py --plan configs/pretrain_plan.json   # resolve the recipe against the bins' meta.json
 python tests/test_model.py                  # torch suite
 python tests/test_model.py -k mtp           # run tests whose name contains "mtp"
 bash scripts/smoke_test.sh                  # synthetic end-to-end run into data/smoke/
@@ -50,21 +56,24 @@ memory/throughput trade-offs.
 ```bash
 # tokenizer -> per-source token bins -> pretrain (three phases) -> (optional) align -> sft -> sample
 python scripts/train_tokenizer.py --out tokenizer --desegment --source "jsonl:data/chat/*.jsonl:text@3200000"
-python scripts/prepare_data.py --tokenizer tokenizer --desegment --source "jsonl:data/chat/*.jsonl:text" --out data/bin/chat --max_tokens 884000000 --val_tokens 4000000
-# weights come from the bins' own meta.json (tools/plan_mix.py), so no bucket is read twice
-python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
-    --data data/bin/fiction:0.45,data/bin/long:0.35,data/bin/wiki:0.20 \
-    --tokens 0.9e9 --seq_len 2048 --decay_frac 0 --resume
-python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
-    --data data/bin/chat:0.2645,data/bin/en_chat:0.0777,data/bin/fiction:0.2378,data/bin/long:0.0689,data/bin/wiki:0.3511 \
-    --tokens 3.2e9 --seq_len 1024 --decay_frac 0 --resume
-python scripts/train.py --stage pretrain --tokenizer tokenizer --out_dir runs/pretrain \
-    --data data/bin/chat:0.34,data/bin/en_chat:0.036,data/bin/fiction:0.28,data/bin/long:0.04,data/bin/wiki:0.284,data/bin/roleplay:0.0147,data/bin/roleplay_char:0.0044,data/bin/roleplay_catgirl:0.0002 \
-    --tokens 4.0e9 --seq_len 1024 --resume
-python scripts/train.py --stage align --tokenizer tokenizer --init_from runs/pretrain/final --out_dir runs/align \
-    --mm_data data/mm/chat_image.jsonl --image_root data/mm/images --epochs 1 --resume
-python scripts/train.py --stage sft --tokenizer tokenizer --init_from runs/align/final --out_dir runs/sft \
-    --train llm --mm_data data/sft/human_dialog.jsonl,data/sft/persona.jsonl,data/sft/refuse.jsonl --epochs 2 --resume
+python scripts/prepare_data.py --tokenizer tokenizer --desegment --source "jsonl:data/chat/*.jsonl:text" --out data/bin/chat --max_tokens 1014000000 --val_tokens 4000000
+# the recipe declares each phase's budget, shape and mixture; plan_mix.py fills in the weights from the
+# bins' meta.json and writes runs/pretrain/plan.resolved.json, which every phase then executes
+python tools/plan_mix.py --plan configs/pretrain_plan.json --write runs/pretrain/plan.resolved.json --print-commands
+python scripts/train.py --stage pretrain --plan runs/pretrain/plan.resolved.json --phase A \
+    --tokenizer tokenizer --out_dir runs/pretrain --compile --resume
+python scripts/train.py --stage pretrain --plan runs/pretrain/plan.resolved.json --phase B \
+    --tokenizer tokenizer --out_dir runs/pretrain --compile --resume
+python scripts/train.py --stage pretrain --plan runs/pretrain/plan.resolved.json --phase C \
+    --tokenizer tokenizer --out_dir runs/pretrain --compile --resume
+python tools/watch_training.py --dir runs/pretrain        # live metrics + alerts (--once for a snapshot)
+python scripts/train.py --stage align --plan runs/pretrain/plan.resolved.json --phase align \
+    --tokenizer tokenizer --init_from runs/pretrain/final --out_dir runs/align \
+    --mm_data data/mm/chat_image.jsonl --image_root data/mm/images --resume
+python scripts/train.py --stage sft --plan runs/pretrain/plan.resolved.json --phase sft \
+    --tokenizer tokenizer --init_from runs/align/final --out_dir runs/sft \
+    --mm_data data/sft/human_dialog.jsonl,data/sft/persona.jsonl,data/sft/refuse.jsonl \
+    --mm_weights 0.74,0.21,0.05 --resume
 python scripts/sample.py --model runs/sft/final --prompt "在吗" --max_new_tokens 32
 ```
 
@@ -79,12 +88,16 @@ Useful flags beyond the per-stage defaults: `--compile` for speed, `--seq_len / 
 --grad_accum` for the shape, `--max_mem_gb 0` to drop the allocator cap, and `--resume` to continue
 (with the data order and GradScaler state preserved). Precision and kernel switches (`--precision`,
 `--gdn_impl`, `--grad_ckpt`, `--ce_ckpt`, `--tf32`) are documented in `doc/architecture.md` §3.
+`--plan / --phase` read the resolved recipe (phase budget, mixture, and one WSD curve over the whole
+token budget); `--mm_weights` sets the align/SFT source mixture. Monitoring switches
+(`--no_monitor`, `--no_intervention`, `--early_stop_patience`, `--lr_backoff`) are documented in
+`doc/monitoring.md`.
 
 ## Verification
 
-1. `tools/check_algorithms_numpy.py`, `tools/check_data_numpy.py`, `tools/estimate.py` — no torch
-   needed; all pass in the sandbox.
-2. `tests/test_model.py` — 25 tests, ~19 s on the RTX 4060 Laptop (GPU paths included). Coverage:
+1. `tools/check_algorithms_numpy.py`, `tools/check_data_numpy.py`, `tools/check_monitor.py`,
+   `tools/estimate.py` — no torch needed; all pass in the sandbox.
+2. `tests/test_model.py` — 26 tests, ~19 s on the RTX 4060 Laptop (GPU paths included). Coverage:
    chunked delta rule ≡ recurrence (forward and gradients), parameter count matches the estimator,
    causality (including images), right padding is inert, MTP label alignment, chunked CE ≡ full CE
    (loss and gradients), gradient/CE checkpoint parity, bf16 autocast, align-stage trains only the
@@ -95,14 +108,16 @@ Useful flags beyond the per-stage defaults: `--compile` for speed, `--seq_len / 
    gradients bit-identical), `test_probe_batch_is_a_valid_model_input` (the memory probe's synthetic
    batch must really be a valid model input). With a GPU it also measures peak memory.
 3. `scripts/smoke_test.sh` — chains `make_synthetic.py` → tiny tokenizer → `prepare_data` →
-   2–3 steps each of pretrain/align/sft → `sample.py`, printing per-step timings (~42 s on the
+   2–3 steps each of pretrain/align/sft → `sample.py`, printing per-step timings (~45 s on the
    RTX 4060 Laptop here). It only verifies that the pipeline runs end to end, not that anything is
    learned: the final sample uses random weights and is expected to be gibberish. To see the vision
    path actually learn, run it with
    `KEEP=1` and train a few hundred more steps on the `data/smoke` data (the synthetic answers are
    deterministic: colors and shapes). The script deletes each stage's checkpoint as soon as the next
    one has loaded it (`last/` carries ~1.6 GB of optimizer state), so a full pass uses ~0.5 GB of
-   disk and keeps only `sft/final`; `KEEP=1` keeps everything.
+   disk and keeps only `sft/final`; `KEEP=1` keeps everything. It also asserts the monitoring
+   contract: `metrics.jsonl` / `health.jsonl` are written and `tools/watch_training.py --once` reads
+   them back at the right step.
 4. Before a real `run_pipeline.sh` run, confirm that the logged `mem_gb` and `nvidia-smi` both stay
    inside the budget, and record `tok_s`.
 
