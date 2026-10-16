@@ -17,9 +17,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from common_io import iter_texts, split_limit  # noqa: E402
-from prepare_local_data import (JOBS, DEFAULT_SNAPSHOT, chunk_texts, clean_cornell,  # noqa: E402
-                               clean_daily_dialog, clean_empathetic, clean_topical, han_ratio,
-                               strip_speaker, strip_wikitext)
+from prepare_local_data import (JOBS, DEFAULT_SNAPSHOT, chunk_texts, clean_bcorpus_line,  # noqa: E402
+                               clean_cornell, clean_daily_dialog, clean_empathetic, clean_topical,
+                               han_ratio, interactive_chapter_text, is_noise_line, split_chapters,
+                               strip_markup, strip_speaker, strip_wikitext)
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 ok = True
@@ -122,6 +123,46 @@ check("Topical-Chat markers become turn breaks",
       clean_topical("<s>[agent_1]Hello.</s><s>[agent_2]Hi!</s>") == "Hello.\nHi!")
 check("Cornell loses its character prefix and CRLF",
       clean_cornell("BIANCA   They do not!\r\n") == "They do not!")
+
+# ---- engine markup, scraped novels, persona cards -------------------------------------------------
+check("presentation tags go but their text stays",
+      strip_markup("I <i>really</i> screwed up...") == "I really screwed up..."
+      and strip_markup('the <color=#FF0000>Purgatory Miso Udon</color> it is')
+      == "the Purgatory Miso Udon it is")
+check("a line break tag becomes a newline", strip_markup("a<br>b") == "a\nb")
+check("the player placeholder becomes the second person, per bucket language",
+      strip_markup("你叫<usr>呀。") == "你叫你呀。"
+      and strip_markup('those guys, <USER>.', "you") == "those guys, you.")
+check("a placeholder that opens a line is read as a speaker tag",
+      strip_markup("<USER>: Good morning!") == "user: Good morning!"
+      and clean_bcorpus_line("<USER>: Good morning!") == "Good morning!")
+check("rune runs are dropped", strip_markup("『<m><o><i>』") == "『』"
+      and strip_markup("「<e><k>:<e><k>:<e><k><r>」") == "「」")
+check("a broken tag that swallowed its text is left alone",
+      strip_markup("<F16「太好了…好、很好」>") == "<F16「太好了…好、很好」>")
+check("entities are decoded", strip_markup("a &quot;q&quot; &amp; b&nbsp;c") == 'a "q" & b c')
+
+check("site furniture, ads and fan notices are dropped, prose is not",
+      is_noise_line("群230692396整理于1月26日") and is_noise_line("http://x.example/a.png")
+      and is_noise_line("投票    收藏到书柜 (3481)") and is_noise_line("⚠️一切勿上升真人和现实生活")
+      and not is_noise_line("他挣扎着爬起身来，随手从身后抄起一把拖把。"))
+
+book = "第1章 星盗窝\n正文一\n第2章 昏迷\n正文二\n\u3000\u3000番外一小秋的性知识学习\n正文三"
+check("a book splits at its headings and keeps each heading with its body",
+      [c.splitlines()[0] for c in split_chapters(book)] == ["第1章 星盗窝", "第2章 昏迷",
+                                                           "\u3000\u3000番外一小秋的性知识学习"])
+check("a book without headings stays one chapter",
+      split_chapters("只有正文\n第二行") == ["只有正文\n第二行"])
+
+chapter = {"chapter_title": "介绍",
+           "content": [{"content_tag": "narration", "role": "", "content": "来客登记"},
+                       {"content_tag": "dialog", "role": "安然", "content": "我是女主哦"},
+                       {"content_tag": "img", "role": "庞博文", "content": "http://x.example/a.png"}]}
+check("an interactive-novel chapter keeps its title and body, drops the `img` URL row",
+      interactive_chapter_text(chapter) == "介绍\n来客登记\n我是女主哦")
+
+check("a persona card loses its wikitext",
+      strip_wikitext("成功<s>推倒</s>了{{黑幕|[[SLB]]}}。<ref>第5集</ref>随后") == "成功推倒了。随后")
 
 # ---- snapshot inputs -----------------------------------------------------------------------------
 snap = os.environ.get("CIRNO_SNAPSHOT", DEFAULT_SNAPSHOT)

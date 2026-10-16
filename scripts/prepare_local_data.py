@@ -6,8 +6,9 @@
 writes the sources whose cleaning happens at the text level and which therefore cannot be expressed as
 a field expression:
 
-    b-corpus       `.txt.gz` works, decompressed and split into documents
+    b-corpus       `.txt.gz` works, decompressed, engine markup/watermarks dropped, split into documents
     moegirl        raw wikitext: templates, tables, comments and markup stripped
+    scraped novels ChineseNovels (whole book -> chapters) and Chinese_interactive_novels_3k (`img` rows)
     JSON arrays    LooksJuicy / catgirl answer sets, plus the catgirl chain-of-thought removal
     English sets   DailyDialog / EmpatheticDialogues / Topical-Chat / Cornell / ESConv noise
 
@@ -143,6 +144,93 @@ def read_gz(path):
             yield line
 
 
+# ---- engine markup and site furniture ------------------------------------------------------------
+# Visual-novel scripts keep their engine's inline markup: `<USER>` / `<usr>` is the player character's
+# name (25.6k occurrences across v-corpus, mostly as a line-initial speaker tag), `<i>` /
+# `<color=#FF0000>` / `<br>` is presentation, and Umineko spells incantations as runs of one-letter tags
+# (`<e><k>:<e><k>:…`).  Only a known vocabulary is removed, so a tag that swallowed its own text
+# (`<F16「太好了…好、很好」>`) survives instead of losing the line with it.
+_PLAYER_SPEAKER = re.compile(r"^\s*<\s*(?:USER|usr|player|玩家)\s*>", re.I | re.M)
+_PLAYER_WORD = re.compile(r"<\s*(?:USER|usr|player|玩家)\s*>", re.I)
+_TAG = re.compile(r"</?\s*([A-Za-z][A-Za-z0-9]{0,9})\b[^<>]{0,80}?/?>")
+_MARKUP_TAGS = {
+    "user", "usr", "i", "b", "u", "s", "em", "strong", "strike", "del", "ins", "mark", "sub", "sup",
+    "font", "color", "size", "span", "div", "p", "br", "hr", "center", "big", "small", "tt", "abbr",
+    "cite", "q", "samp", "dfn", "bdi", "bdo", "ruby", "rt", "rb", "rp", "pre", "code", "nobr", "wbr",
+    "h1", "h2", "h3", "h4", "h5", "h6", "li", "ul", "ol", "table", "tr", "td", "th", "tbody", "thead",
+    "img", "a", "nowiki", "details", "summary", "figure", "figcaption", "blockquote", "section",
+    "article", "marquee", "kbd", "var", "output", "time", "picture", "source", "audio", "video",
+    "canvas", "iframe", "embed", "object", "param", "map", "area", "svg", "math",
+}
+_BREAK_TAGS = {"br", "p", "div", "tr", "li"}
+# A run of one/two-letter tags is engine notation, never prose; `[^\s:：·・、-]{0,3}` keeps the colons
+# and middle dots that separate the runes inside the run.
+_RUNE_RUN = re.compile(r"(?:<\s*[A-Za-z]{1,2}\s*>[\s:：·・、\-]{0,3}){3,}")
+_ENTITY = {"&nbsp;": " ", "&quot;": '"', "&apos;": "'", "&lt;": "<", "&gt;": ">", "&amp;": "&"}
+_ENTITY_RE = re.compile(r"&(?:nbsp|quot|apos|lt|gt|amp|#\d{1,5});", re.I)
+# NUL and the other C0 controls the scrapers left behind, plus U+FFFD from a broken decode.
+_CTRL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ufffd]")
+
+
+def _entity(match):
+    token = match.group(0)
+    if token.lower().startswith("&#"):
+        return chr(int(token[2:-1]))
+    return _ENTITY[token.lower()]
+
+
+def strip_markup(text, player="你"):
+    """Drop engine/HTML markup from one line, keeping its text and turning `<br>`s into newlines.
+
+    `player` replaces the inline player-name placeholder; a placeholder that opens a line is rewritten to
+    `user` instead, so `strip_speaker` still recognises it as a speaker tag."""
+    text = _PLAYER_SPEAKER.sub("user", text)
+    text = _PLAYER_WORD.sub(player, text)
+
+    def _sub(m):
+        name = m.group(1).lower()
+        # a one/two-letter tag is never prose: Umineko writes its runes as `<e>`/`<r>`/`<ng>`, and the
+        # engines leave stray `<T 0>` markers behind.  Every real two-letter tag is in the set above.
+        if len(name) > 2 and name not in _MARKUP_TAGS:
+            return m.group(0)
+        return "\n" if name in _BREAK_TAGS else ""
+
+    text = _RUNE_RUN.sub("", text)
+    text = _TAG.sub(_sub, text)
+    for _ in range(2):  # scraped HTML is often escaped twice (`&amp;#9;`)
+        text = _ENTITY_RE.sub(_entity, text)
+    return text
+
+
+# Scraped novels carry the site's own furniture between chapters: group/QQ numbers, off-site links and
+# "read the latest chapter here" pointers, plus the work header the scraper kept (`投票 收藏到书柜`,
+# `原创 / 男男 / …`).  The short-line guard keeps a prose sentence that merely mentions 投票 or 连载中.
+_AD_LINE = re.compile(
+    r"https?://|www\.[a-z0-9-]+\.|(?:qq|微信|weixin)\s*群|群\s*[:：]?\s*\d{5,}|"
+    r"最新章节|请记住本站|手机版|全文阅读|加入书签|更多小说|资源尽在|整理于|【作家想说的话", re.I)
+# Fan-work notices the platform asks the author to paste at the top of a chapter.  These phrases do not
+# occur in narrative prose, so unlike the furniture above they need no length guard.
+_NOTICE = re.compile(r"勿上升真人|请勿上升|禁止抄袭|禁止转载|未经允许|侵权必究|纯属虚构|如有雷同|"
+                     r"求收藏|求推荐票|求月票|排雷|避雷|可删|勿喷")
+_FURNITURE = re.compile(r"投票|收藏到书柜|作品编号|连载中|^\s*原创\s*/")
+
+
+def is_noise_line(line):
+    """True for a blank line, an ad/watermark line, a notice, or a short line of site furniture."""
+    s = line.strip()
+    if not s:
+        return True
+    if _AD_LINE.search(s) or _NOTICE.search(s):
+        return True
+    return bool(len(s) <= 40 and _FURNITURE.search(s))
+
+
+def clean_bcorpus_line(line, player="你"):
+    """One `角色名：`-tagged visual-novel line: BOM, control characters, engine markup, speaker tag."""
+    line = _CTRL.sub("", line.replace("\ufeff", "").strip())
+    return strip_speaker(strip_markup(line, player)).rstrip("\\").strip()
+
+
 # ---- wikitext ------------------------------------------------------------------------------------
 _COMMENT = re.compile(r"<!--.*?-->", re.S)
 _REF = re.compile(r"<ref[^>]*?/>|<ref[^>]*?>.*?</ref>|<references\s*/>", re.S | re.I)
@@ -234,11 +322,12 @@ def _bcorpus_paths(root, patterns):
     return sorted({p for p in paths if p.endswith(".gz")})
 
 
-def _bcorpus(root, out, patterns):
+def _bcorpus(root, out, patterns, player="你"):
     written = 0
     with Sink(out) as sink:
         for path in _bcorpus_paths(root, patterns):
-            for doc in chunk_texts(clean_line(ln) for ln in read_gz(path)):
+            lines = (clean_bcorpus_line(ln, player) for ln in read_gz(path))
+            for doc in chunk_texts(x for x in lines if not is_noise_line(x)):
                 sink.write(doc)
             written += 1
     return sink.docs, sink.chars, f"{written} files"
@@ -251,7 +340,7 @@ def bcorpus_zh(root, out):
 
 @job("bcorpus_en", "en_chat/bcorpus_en.jsonl", ["Limour--b-corpus/v-corpus-en/*.txt.gz"])
 def bcorpus_en(root, out):
-    return _bcorpus(root, out, ["v-corpus-en/*.txt.gz"])
+    return _bcorpus(root, out, ["v-corpus-en/*.txt.gz"], player="you")
 
 
 @job("bcorpus_fiction", "fiction/bcorpus_fiction.jsonl",
@@ -272,6 +361,79 @@ def bcorpus_long(root, out):
 @job("bcorpus_roleplay", "roleplay/bcorpus_roleplay.jsonl", ["Limour--b-corpus/q-corpus/*.txt.gz"])
 def bcorpus_roleplay(root, out):
     return _bcorpus(root, out, ["q-corpus/*.txt.gz"])
+
+
+# ------------------------------------------------------------------------------------------------
+# scraped novels: one whole book per record
+# ------------------------------------------------------------------------------------------------
+# `--max_doc_chars` keeps only the head of a document, and 21% of ChineseNovels' books are longer than
+# that limit, so a book has to become chapters before it enters a bucket; `chunk_texts` then cuts each
+# chapter at line boundaries.  Only 47% of the books carry explicit headings, the rest fall back to the
+# ~4k-character chunks.
+_CHAPTER_LINE = re.compile(
+    r"^\s*(?:第\s*[0-9零一二三四五六七八九十百千万两]{1,12}\s*[章回节卷话集部篇][^\n]{0,40}"
+    r"|(?:Chapter|CHAPTER)\s*\d{1,4}[^\n]{0,40}"
+    r"|(?:序章|序言|楔子|尾声|后记|前言|番外|外传)[^\n]{0,30})\s*$")
+
+
+def split_chapters(text):
+    """Cut a whole book at its chapter headings, each heading staying with the body it introduces."""
+    chapters, buf = [], []
+    for line in text.splitlines():
+        if buf and _CHAPTER_LINE.match(line):
+            chapters.append("\n".join(buf))
+            buf = []
+        buf.append(line)
+    if buf:
+        chapters.append("\n".join(buf))
+    return chapters
+
+
+@job("chinesenovels", "fiction/chinesenovels.jsonl", ["Miaowuawa--ChineseNovels/haitang.jsonl"])
+def chinesenovels(root, out):
+    """Chapter-split, ad-stripped Miaowuawa/ChineseNovels (doc/datasets.md 1.3)."""
+    path = os.path.join(root, "Miaowuawa--ChineseNovels", "haitang.jsonl")
+    with Sink(out) as sink, open(path, encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            book = _CTRL.sub("", json.loads(line).get("text") or "")
+            for chapter in split_chapters(book):
+                lines = (strip_markup(ln) for ln in chapter.splitlines() if not is_noise_line(ln))
+                for doc in chunk_texts(lines):
+                    sink.write(doc)
+    return sink.docs, sink.chars, "1 file"
+
+
+_CONTENT_TAGS = ("narration", "dialog")
+
+
+def interactive_chapter_text(chapter):
+    """One `book_chapter` entry as text: `chapter_title` plus the narration/dialogue rows.
+
+    `content_tag`/`role` are metadata (the old field expression dropped them, and `role` as a speaker tag
+    would repeat the name the b-corpus cleaner strips); `img` rows are bare image URLs."""
+    parts = [p.get("content") or "" for p in (chapter.get("content") or [])
+             if (p.get("content_tag") or "") in _CONTENT_TAGS]
+    title = (chapter.get("chapter_title") or "").strip()
+    return "\n".join(x for x in (title, strip_markup(_CTRL.sub("", "\n".join(parts)))) if x)
+
+
+@job("interactive_novels", "fiction/interactive_novels.jsonl",
+     ["mrzjy--Chinese_interactive_novels_3k/default/train/*.parquet"])
+def interactive_novels(root, out):
+    """mrzjy/Chinese_interactive_novels_3k, which ships uncleaned (URLs in `img` rows, author notes)."""
+    files = sorted(glob.glob(os.path.join(root, "mrzjy--Chinese_interactive_novels_3k", "default",
+                                          "train", "*.parquet")))
+    with Sink(out) as sink:
+        for path in files:
+            for rec in _parquet_rows(path, ["book_chapter"], batch_size=256):
+                for chapter in rec.get("book_chapter") or []:
+                    lines = [ln for ln in interactive_chapter_text(chapter).splitlines()
+                             if not is_noise_line(ln)]
+                    for doc in chunk_texts(lines):
+                        sink.write(doc)
+    return sink.docs, sink.chars, f"{len(files)} shards"
 
 
 @job("kajiwoto", "en_chat/kajiwoto.jsonl", ["Limour--b-corpus/emoji/kajiwoto.txt.gz"])
@@ -318,13 +480,17 @@ def looksjuicy(root, out):
     """`instruction` becomes `system_prompt`, or the character card is repeated in every user turn.
 
     The record keeps both spellings of the content: pretraining reads `text`, SFT reads the
-    `system_prompt`/`input`/`output` fields through normalize_messages (doc/datasets.md 1.6)."""
+    `system_prompt`/`input`/`output` fields through normalize_messages (doc/datasets.md 1.6).  The cards
+    are copied from wiki pages, so `strip_wikitext` runs over all three fields instead of only the
+    pretraining text (`{{黑幕|…}}`, `<s>…</s>`, `[[…]]`, `<ref>…</ref>`)."""
     path = os.path.join(root, "LooksJuicy--Chinese-Roleplay-SingleTurn", "Roleplay_Anime_xhj_alpaca.json")
     with open(path, encoding="utf-8") as f:
         records = json.load(f)
     with Sink(out, records=True) as sink:
         for rec in records:
-            card, user, reply = rec.get("instruction", ""), rec.get("input", ""), rec.get("output", "")
+            card = strip_wikitext(rec.get("instruction") or "")
+            user = strip_wikitext(rec.get("input") or "")
+            reply = strip_wikitext(rec.get("output") or "")
             sink.write_record({"text": "\n".join(x for x in (card, user, reply) if x),
                                "system_prompt": card, "input": user, "output": reply})
     return sink.docs, sink.chars, "json array"
@@ -356,10 +522,10 @@ def catgirl(root, out):
 # ------------------------------------------------------------------------------------------------
 # wiki and the English small sets (parquet / jsonl inputs)
 # ------------------------------------------------------------------------------------------------
-def _parquet_rows(path, columns):
+def _parquet_rows(path, columns, batch_size=4096):
     import pyarrow.parquet as pq
 
-    for batch in pq.ParquetFile(path).iter_batches(columns=columns, batch_size=4096):
+    for batch in pq.ParquetFile(path).iter_batches(columns=columns, batch_size=batch_size):
         yield from batch.to_pylist()
 
 

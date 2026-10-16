@@ -13,9 +13,10 @@
 >    因此都是本地 `parquet:` / `jsonl:` 路径，且开头导出 `HF_HUB_OFFLINE` / `HF_DATASETS_OFFLINE` /
 >    `TRANSFORMERS_OFFLINE`。
 > 2. **文本层清洗**由 `scripts/prepare_local_data.py` 完成，产物落在 `data/<bucket>/*.jsonl`：b-corpus
->    的 `.txt.gz`（解压、按 ~4000 字符切分、去 `角色名：`/`user：` 前缀）、萌娘百科原始 wikitext、两个
->    JSON 数组角色扮演集（含猫娘思维链）、以及带标点/标记噪声的英文小集。其余源直接在快照上按字段
->    表达式读，不改动快照。
+>    的 `.txt.gz`（解压、按 ~4000 字符切分、去 `角色名：`/`user：` 前缀与 `<USER>` 一类引擎标记、站点水印）、
+>    萌娘百科原始 wikitext、两个 JSON 数组角色扮演集（含猫娘思维链、人设卡上的 wikitext）、带标点/标记
+>    噪声的英文小集，以及两个抓来的网文集（`ChineseNovels` 拆章、`Chinese_interactive_novels_3k` 取正文并
+>    丢掉 `img`/作者注）。其余源直接在快照上按字段表达式读，不改动快照。
 > 3. `silver/lccc` 的 `dialog` 字段是**空格分词**的（`你 去 那儿 竟然` 这种），所有吃它的步骤都要带
 >    `--desegment`（`train_tokenizer.py` / `prepare_data.py` / `train.py` 的 SFT 阶段都有这个开关）。
 > 4. **字符 → token**：中文按 0.70 token/字符、英文 0.25 估算（32k BPE，实测口径 1.18B token / 1.68B 字符
@@ -47,8 +48,8 @@
   - 来源：soda、真人小集、b-corpus `v-corpus-en`+`emoji`、`TinyStoriesV2`
 - **`fiction`** — 小说 / 网文 / 剧本对白
   - 阶段权重 A / B / C：45% / 24.1% / 28%
-  - 全程 token 1.593B；池子 1.593B；遍数 1.00
-  - 来源：webnovel-chinese、b-corpus `互动小说`/`近现代小说`/`翻译名著`/`轻小说`、ChineseNovels
+  - 全程 token 1.551B；池子 1.551B；遍数 1.00
+  - 来源：webnovel-chinese、mrzjy 互动小说、b-corpus `近现代小说`/`翻译名著`/`轻小说`、ChineseNovels
 - **`long`** — 长文 / 非对话文本
   - 阶段权重 A / B / C：35% / 1.9% / 4%
   - 全程 token 527M；池子 527M；遍数 1.00
@@ -70,7 +71,7 @@
   - 全程 token 0.15M；池子 0.15M；遍数 1.00
   - 来源：kxdw2580 v2
 
-合计预算 = 5.39B
+合计预算 = 5.35B
 
 ### 1.1 chat — 中文人类对话 / 口语
 
@@ -94,6 +95,9 @@
     解压后按 ~4000 字符一篇落盘；180.2M 字符 ≈ 126M token）
   - 视觉小说台词，按 `厂商/作品/线路` 组织，行是 `角色名：「台词」` 或纯旁白，中文行
     中位 21 字。仓库里混着 130 多个 `.py`/`.bat` 提取脚本，glob 要写成 `*.txt.gz`；`txt:` 一个文件一篇文档，必须先拆行
+  - 清洗同时去掉引擎标记：`<usr>`/`<USER>` 是主角名（行首的当作说话人前缀丢掉，行内的换成 `你`/`you`）、
+    `<color=…>`/`<i>`/`<br>` 一类样式，以及海猫那类用单字标签拼的咒文（`<e><k>:<e><k>`）；缺少闭合的
+    标签（`<F16「…」>`）整段保留，避免连同正文一起删掉
 
 同仓的 `v-corpus-en`（135 个 `.txt.gz` / 69.3 MB）是英文视觉小说对白，归 §1.2。该桶的池子 = LCCC
 base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再要扩只能从修好卡拉OK问题后的字幕余量上想办法。
@@ -137,7 +141,7 @@ base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再�
   135 个 `.txt.gz` / 69.3 MB 压缩，抽样 2.86 字符/压缩字节 → ≈200M 字符 ≈ **50M token 量级**（Han 0.00，
   纯英文）
   - 英文视觉小说台词，格式与中文侧一致（`角色名：「台词」`），是该桶最大的一份人类写作文本（+≈50M，
-    该桶池子与顺序见本节末）
+    该桶池子与顺序见本节末）。清洗与中文侧共用一套规则，行内的 `<USER>` 换成 `you`
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `emoji/kajiwoto.txt.gz`** — ⚠️ 合成；
   6.70M 字符 / 147k 行（Han 0.00）≈ **1.7M token**
   - 目录名叫 emoji，内容是 **`user：`/`gpt：` 的英文对话日志**（kajiwoto 是 AI 角色平台），`gpt：` 一侧
@@ -161,18 +165,22 @@ base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再�
 - **[wdndev/webnovel-chinese](https://hf.co/datasets/wdndev/webnovel-chinese)** — 网文；600k 章 / 3.2 GB
   （实测 1.68B 字符 ≈ 1.18B token）
   - 该桶主力。字段干净（`title`/`chapter`/`text`）
-- **[Miaowuawa/ChineseNovels](https://hf.co/datasets/Miaowuawa/ChineseNovels)** — 网文；2,292 本 / 623 MB
-  parquet，抽样 300 本中位 22.3 万字符（Han 0.80）→ 全量 ≈755M 字符 ≈ **529M token**；`--max_doc_chars`
-  默认 200000 会按篇截断，**56% 的书被砍**，截断后 ≈363M 字符 ≈ **254M token**
-  - 同人/耽美占比高，单列结构（viewer 打不开，用 `-` 取整条记录）。⚠️ **一整本一篇文档**，进桶前应拆章，
-    否则每本只进前 200k 字符；
+- **[Miaowuawa/ChineseNovels](https://hf.co/datasets/Miaowuawa/ChineseNovels)** — 网文；2,292 本 /
+  0.334B 字符（均 145,567、中位 87,969，Han 0.80）≈ **234M token**
+  - 取法：`jsonl:data/fiction/chinesenovels.jsonl:text`（`prepare_local_data.py` 拆章后按 ~4000 字符落盘，
+    99,474 篇 / 317.8M 字符；去掉了站点广告与求票/避雷一类声明）
+  - 同人/耽美占比高，单列结构（viewer 打不开，用 `-` 取整条记录）。⚠️ **一整本一篇文档**：47% 的书有
+    `第N章`/`番外` 一类标题按它切，其余按 ~4000 字符切；不切的话 475 本（20.7%）会被
+    `--max_doc_chars 200000` 砍掉尾部
 - **[mrzjy/Chinese_interactive_novels_3k](https://hf.co/datasets/mrzjy/Chinese_interactive_novels_3k)** —
-  互动小说【流行文化】；3,534 部 / parquet 362.6 MB，抽样 30 部均 60.3k 字符（中位 31.3k，长尾）→
-  ≈213M 字符 ≈ **149M token**
+  互动小说【流行文化】；3,534 部 / parquet 362.6 MB，≈213M 字符 ≈ **149M token**（清洗后 183.2M 字符
+  ≈ 128M token）
+  - 取法：`jsonl:data/fiction/interactive_novels.jsonl:text`（`prepare_local_data.py` 取 `narration`/`dialog`
+    两类 `content`，`chapter_title` 作章首行，按 ~4000 字符落盘，158,607 篇）
   - b-corpus `互动小说/**` 的原始集（那里打成 21 个 7z 分卷，直接读 Hub 这份更省事）。`book_chapter` →
     `chapter_title` + `content` 列表（`content_tag`/`role`/`content`），同人与互动小说为主。⚠️ 卡片自标
-    **uncleaned**；`content_tag`（`narration`/`dialog`）与 `role` 会被 `_to_text` 拼进正文，所以字段路径
-    写成 `book_chapter.content.content` 只取正文；apache-2.0 是上游标注，内容是二次创作
+    **uncleaned**：`img` 行是图片 URL，正文里还夹着"勿上升真人"/禁止转载一类作者声明，都在清洗里丢掉；
+    `content_tag`/`role` 是元数据，不进正文；apache-2.0 是上游标注，内容是二次创作
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `近现代小说/**`** — 出版小说【流行文化】；
   43 个 `.txt.gz` / 15.0 MB，抽样 0.78 字符/压缩字节 → ≈11.7M 字符 ≈ **8.2M token**
   - 张承志《黑骏马》这类近现代小说，简体、叙事完整。⚠️ `txt:` 一个文件一篇文档，长篇要按 ~4000 字符切分
@@ -183,9 +191,9 @@ base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再�
   - 《可塑性记忆 Heartfelt Thanks》，量小，随该桶一起进
 
 该桶原本的 1.176B token 是 `wdndev/webnovel-chinese` parquet 分支的全量（网文，一遍读完）；b-corpus 再补
-`互动小说`（≈149M，同人、未清洗）与 `近现代小说`/`翻译名著`/`轻小说`，
-池子 ≈1.34B；`Miaowuawa/ChineseNovels` 再补 ≈254M token（整本一篇，不拆章就只进每本前 200k 字符），
-池子 ≈1.59B。真公版书（b-corpus `古籍`）偏文言文，是风格污染，不进该桶。
+`近现代小说`/`翻译名著`/`轻小说`（18.9M 字符 ≈ 13M）与 `互动小说`（清洗后 ≈128M），`Miaowuawa/ChineseNovels`
+拆章后补 ≈234M，池子 ≈**1.55B**（旧的 1.593B 按 `ChineseNovels` 755M 字符的抽样外推算，本地文件实测只有
+0.334B 字符）。真公版书（b-corpus `古籍`）偏文言文，是风格污染，不进该桶。
 
 ### 1.4 long — 长文 / 非对话文本
 
@@ -237,7 +245,8 @@ base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再�
 - **[LooksJuicy/Chinese-Roleplay-SingleTurn](https://hf.co/datasets/LooksJuicy/Chinese-Roleplay-SingleTurn)**
   — 角色扮演【流行文化】；7,593 条 / **4.66M 字符 ≈ 3.3M token**
   - 取法：`jsonl:data/roleplay/looksjuicy.jsonl:-`（`prepare_local_data.py` 把 JSON 数组转成 jsonl，
-    并把 `instruction` 改名 `system_prompt`）
+    并把 `instruction` 改名 `system_prompt`；`instruction`/`input`/`output` 三个字段都过一遍萌娘百科那套
+    `strip_wikitext`，因为人设卡是从 wiki 抄的——`{{黑幕|[[SLB]]}}`、`<s>推倒</s>`、`<ref>第5集</ref>`）
   - 作品角色的官方设定 + 单轮扮演回复，是这批里最贴"角色扮演"定位的一份；apache-2.0。实测 `instruction`
     （人设）中位 **514** 字、`input`（用户）中位 8 字、`output`（角色回复，带 `（动作描写）`）中位 100 字、
     p90 156 字，Han 比例 0.87。⚠️ `instruction` **不在** `normalize_messages` 的 `_PERSONA` 里（只认
@@ -299,7 +308,7 @@ base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再�
 - **[LooksJuicy/Chinese-Roleplay-SingleTurn](https://hf.co/datasets/LooksJuicy/Chinese-Roleplay-SingleTurn)**
   — 人设单轮【流行文化】
   - 取法：`prepare_local_data.py` 把它并进 `data/sft/persona.jsonl`（`instruction` 同时改名
-    `system_prompt`）
+    `system_prompt`，三个字段都过 `strip_wikitext`，见 §1.6）
   - 作品角色的官方人设 + 扮演回复，直接可用（别名表实测通过：`output`→`self`、`input`→附带在 user 轮）。
     改名后人设进 `system` 且不计损失；不改名则整段人设拼进 user 轮并在每轮重复（见 §1.6）
 
