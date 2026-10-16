@@ -441,6 +441,48 @@ def test_chat_dataset_reads_source_specs():
         assert img is None and len(ids) == len(labels) and any(l != -100 for l in labels)
 
 
+def test_eval_prompt_matches_training_encoding():
+    """The eval/sample prompt is the training-time prefix of the same conversation: same ChatML layout and
+    the image block in the same slot.  A drift here would score generations from a distribution the model
+    was never trained on, and every eval number would be silently meaningless."""
+    from hvlm.data_core import encode_conversation, encode_prompt  # noqa: E402
+
+    enc = lambda s: [10 + (ord(c) % 50) for c in s]  # noqa: E731
+    sp = dict(im_start=1, im_end=2, vision_start=3, vision_end=4, image_pad=5)
+    msgs = [{"role": "user", "content": "在吗"}, {"role": "self", "content": "在的咋啦"},
+            {"role": "user", "content": "吃了吗"}]
+    prompt = encode_prompt(enc, sp, msgs, 4, False)
+    ids, labels, used = encode_conversation(enc, sp, msgs + [{"role": "self", "content": "刚吃完"}], 4, False, 4096)
+    assert not used and ids[:len(prompt)] == prompt, "the generation prompt drifted from the training encoding"
+    head = [sp["im_start"]] + enc("self\n")  # the opening turn the model continues from
+    assert prompt[-len(head):] == head and labels[len(prompt) - len(head):len(prompt)] == [-100] * len(head), \
+        "the turn the model generates from must carry no loss"
+
+    img = [{"role": "user", "content": "<image>\n这是什么"}]
+    prompt_i = encode_prompt(enc, sp, img, 4, True)
+    ids_i, _labels, used_i = encode_conversation(enc, sp, img + [{"role": "self", "content": "喵"}], 4, True, 4096)
+    assert used_i and ids_i[:len(prompt_i)] == prompt_i and prompt_i.count(sp["image_pad"]) == 4
+
+
+def test_eval_generation_is_reproducible():
+    """Same seed, same sample: report.json's numbers have to be reproducible from the recorded seed."""
+    m = tiny_model().eval()
+    ids = rand_batch(m.config, B=1, T=16)["input_ids"][0].tolist()
+
+    def sample():
+        torch.manual_seed(7)
+        return m.generate_simple(torch.tensor([ids]), max_new_tokens=6, temperature=0.7, top_k=40)
+
+    assert torch.equal(sample(), sample())
+
+    sys.path.insert(0, os.path.join(ROOT, "scripts"))
+    from eval import sample_seed  # noqa: E402
+
+    assert sample_seed(1234, "imform", "im01", 0) == sample_seed(1234, "imform", "im01", 0)
+    assert sample_seed(1234, "imform", "im01", 1) != sample_seed(1234, "imform", "im01", 0), \
+        "the per-sample seed must vary, or K samples would be one sample repeated"
+
+
 def test_gpu_memory_under_8gb():
     if not torch.cuda.is_available():
         print("    (skipped: no CUDA device)")

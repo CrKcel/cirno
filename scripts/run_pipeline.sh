@@ -119,6 +119,12 @@ python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/
 python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/roleplay_char --max_tokens 6600000 --val_tokens 100000 "${CHAR[@]}"
 python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/roleplay_catgirl --max_tokens 210000 --val_tokens 20000 "${CATGIRL[@]}"
 
+# 1b. the one evaluation input that needs the tokenizer: the human reply-length prior the imform set
+#     compares against (real human replies from the SFT slice, in this tokenizer's tokens).  The probes
+#     themselves are authored in evals/ and need nothing built.
+python scripts/eval.py --tokenizer tokenizer --desegment --length-prior data/sft/human_dialog.jsonl \
+    --out runs/eval/imform_prior.json
+
 # 2. text pre-training: configs/pretrain_plan.json is the recipe, and plan_mix.py is what turns it into
 #    runnable phases.  The mixture is a schedule, not a constant - phase A spends the first 1.21B on
 #    long-form only at seq 2048, phase B brings dialogue in for 3.10B, phase C decays on chat + role-play
@@ -163,6 +169,11 @@ python scripts/train.py --stage pretrain --plan runs/pretrain/plan.resolved.json
 #    "N evaluations without a new best val loss" into a stop.  --no_intervention keeps the alerts only;
 #    doc/monitoring.md has the thresholds.
 
+# 2b. evaluate the pre-training artifact once the anneal finished: the probes are scored on generation
+#     (doc/evaluation.md), so this is the first point where "does it still chat" is visible as a number.
+#     The gates belong to the SFT stage, so this run is trend-only; --bench adds the edge cost numbers.
+python scripts/eval.py --model runs/pretrain/final --tokenizer tokenizer --out runs/eval/pretrain --bench
+
 # 3. (optional) vision alignment: only when the deployment really sees images (stickers / memes /
 #    chat screenshots).  LLM frozen, ViT + projector learn from IN-CONVERSATION images, not academic
 #    VQA captions - VQA data pulls the model back towards assistant behaviour.  Skip this stage for a
@@ -172,6 +183,11 @@ python scripts/train.py --stage pretrain --plan runs/pretrain/plan.resolved.json
 python scripts/train.py --stage align --plan runs/pretrain/plan.resolved.json --phase align \
     --tokenizer tokenizer --init_from runs/pretrain/final --out_dir runs/align \
     --mm_data data/mm/chat_image.jsonl --image_root data/mm/images --resume
+
+#    The same probes on the aligned checkpoint.  The authored sets are text-only; image probes enter with
+#    `--set <name>=<jsonl>` plus `--image_root <dir>` (tools/make_synthetic.py writes one such set for the
+#    smoke test).
+python scripts/eval.py --model runs/align/final --tokenizer tokenizer --out runs/eval/align
 
 # 4. dialogue / role-play SFT: human-to-human conversations + personas + a small out-of-scope refusal
 #    set ("I don't know, ask an AI").  Only the imitated side (the `self` role in the encoder)
@@ -188,5 +204,14 @@ python scripts/train.py --stage sft --plan runs/pretrain/plan.resolved.json --ph
     --tokenizer tokenizer --init_from runs/align/final --out_dir runs/sft \
     --mm_data data/sft/human_dialog.jsonl,data/sft/persona.jsonl,data/sft/refuse.jsonl \
     --mm_weights 0.74,0.21,0.05 --desegment --resume
+
+# 5. evaluate the deployed artifact.  The automated numbers are trend-only; the two things that decide a
+#    release are the blind-test win rate and the assistant-tone / AI-self-reference gates (doc/evaluation.md).
+#    --blind N writes N pairs where the model's reply and a real human reply answer the same context:
+#      python tools/blind_test.py --dir runs/eval/sft        # label (a/b/tie/skip)
+#      python tools/blind_test.py --score runs/eval/sft      # fold the win rate into report.json
+python scripts/eval.py --model runs/sft/final --tokenizer tokenizer --out runs/eval/sft --blind 30
+python tools/eval_table.py runs/eval/pretrain/report.json runs/eval/align/report.json \
+    runs/eval/sft/report.json --baseline runs/eval/pretrain/report.json
 
 python scripts/sample.py --model runs/sft/final --prompt "在吗" --max_new_tokens 32

@@ -309,7 +309,23 @@ SFT 的多个来源在 `ChatDataset` 里是**按行数拼接**的（各项顺序
 `prepare_local_data.py` 从快照落盘（同时打印无法映射的记录数），拒答集没有现成来源，按
 [training.md §4.4](training.md) 自己写。
 
-## 3. 使用前自检
+## 3. 评测集
+
+评测探针自撰并随仓库发布（`evals/*.jsonl`），**不来自下面任何训练源**，所以通识题与人设题不会被语料污染；
+格式、字段与打分口径见 [evaluation.md](evaluation.md)，`tools/check_eval.py` 每次校验全部文件。
+
+| 文件 | 来源 |
+|---|---|
+| `evals/knowledge.jsonl` | 自撰 150 题：稳定事实 60、非实时天气常识 20、身边事 20、该答"不知道"50（私人/实时/无法确定） |
+| `evals/persona.jsonl` | 自撰 8 个人设卡 + 6 条无人设探针；身份问答与跨采样一致性用 |
+| `evals/imform.jsonl` | 自撰 60 条 IM 上下文（闲聊/情绪/身边事/跳题/游戏内） |
+| `evals/roleplay.jsonl` | 自撰 20 个场景（12 原创 + 8 与训练语料同源的作品角色），每场景 2–4 条 rubric |
+| `runs/eval/imform_prior.json` | 派生量：`data/sft/human_dialog.jsonl`（LCCC base 切片）里人类回复的长度分位，用项目 tokenizer 统计，`run_pipeline.sh` 步骤 1b 生成 |
+
+盲测的人类臂取自同一份 `data/sft/human_dialog.jsonl`，因此模型可能背下它；`report.blind.parrot_rate`
+把两臂近似逐字相同的比例报出来，避免把背诵读成自然度（见 [evaluation.md](evaluation.md) §4）。
+
+## 4. 使用前自检
 
 正式 tokenize 之前先用 `@N` 抽一小批看看文本长什么样、字段有没有取错：
 

@@ -13,6 +13,7 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, os.path.dirname(__file__))
 from data import load_image, special_ids  # noqa: E402
+from hvlm.data_core import encode_prompt  # noqa: E402
 from hvlm.modeling_hvlm import HVLMForConditionalGeneration  # noqa: E402
 
 
@@ -39,12 +40,10 @@ def main():
         ids = enc(a.prompt)
     else:
         vc = model.config.vision_config
-        body = []
         if a.image:
             pix = load_image(a.image, vc.image_size)[None].to(a.device)
-            body = [sp["vision_start"]] + [sp["image_pad"]] * vc.num_image_tokens + [sp["vision_end"]]
-        ids = ([sp["im_start"]] + enc("user\n") + body + enc(a.prompt) + [sp["im_end"]] + enc("\n")
-               + [sp["im_start"]] + enc("self\n"))
+        ids = encode_prompt(enc, sp, [{"role": "user", "content": a.prompt}], vc.num_image_tokens,
+                            bool(a.image))
     stop = tok.convert_tokens_to_ids("<|endoftext|>" if a.raw else "<|im_end|>")
     with torch.autocast(device_type=torch.device(a.device).type, dtype=torch.bfloat16):
         out = model.generate_simple(torch.tensor([ids], device=a.device), pixel_values=pix,

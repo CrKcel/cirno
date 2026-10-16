@@ -32,6 +32,9 @@
 反向）；`vit_lr_mult` 是 ViT 相对于 LLM 的学习率倍数。`sft` 是脚本里的历史阶段名，含义是**对话 /
 角色扮演微调**；跳过视觉对齐、只做纯文本对话时用 `--train llm`（见 §3）。
 
+**评测**是每个阶段产物之后的独立一环（`scripts/eval.py`，见 §6）：它不参与训练的步数与 token 记账，
+所以配方的预算、形状与调度不因为评测而改变。
+
 ## 2. 阶段 1：预训练
 
 - **配方是文件，不是命令行**。`configs/pretrain_plan.json` 声明三段各自的预算、形状、配比目标，以及每个桶的
@@ -292,18 +295,34 @@ python scripts/train.py --stage sft --plan runs/pretrain/plan.resolved.json --ph
 
 ## 6. 评测
 
-这个定位下，损失/ppl 不作为选型依据。至少覆盖：
+损失/ppl 只用于确认没训崩，选型与发布看生成结果。评测是独立环节，对任意 checkpoint 跑一遍探针集并写出
+报告，**不进入训练步进循环**；完整说明见 [evaluation.md](evaluation.md)。
 
-| 维度 | 指标 | 做法 |
+```bash
+# 0. 人类回复长度先验（用项目 tokenizer，随流水线步骤 1b 生成）
+python scripts/eval.py --tokenizer tokenizer --desegment --length-prior data/sft/human_dialog.jsonl \
+    --out runs/eval/imform_prior.json
+# 1. 对一个 checkpoint 跑全部探针集；--bench 加端侧成本，--blind N 生成人工盲测素材
+python scripts/eval.py --model runs/sft/final --tokenizer tokenizer --out runs/eval/sft --bench --blind 30
+# 2. 人工盲测：逐条二选一，然后把胜率写回报告
+python tools/blind_test.py --dir runs/eval/sft
+python tools/blind_test.py --score runs/eval/sft
+# 3. 跨 checkpoint / 阶段对比（pretrain → align → sft）
+python tools/eval_table.py runs/eval/*/report.json --baseline runs/eval/pretrain/report.json
+```
+
+| 维度 | 指标 | 所在集合 |
 |---|---|---|
-| 语言自然度 | 人类盲测胜率 | 同一上下文，人写回复 vs 模型回复，双盲二选一；目标是接近 50% 分不出 |
-| 人设一致性 | 身份问答一致率 | 同一 persona 多轮问名字/年龄/职业；无人设时统计各会话给出的身份分布（应接近语料先验，且**不**出现 AI 自述） |
-| 越界拒答 | 拒答率 / 误拒率 | 越界 prompt 库（数学/物理/代码/医疗/法律）上的拒答率，以及日常闲聊被误拒的比例 |
-| 角色扮演 | 场景复述得分 | `MiniMaxAI/role-play-bench`（zh 1.6k / en 1.5k dialogues，各带场景 seed 与评分项）。扮演没有唯一正解，按 rubric 评，不用 ppl |
-| IM 形态 | 回复长度分布、助理腔词命中 | 与人类对话的长度分位数对比；统计 §4.5 列的那类模式词 |
-| 端侧成本 | 首 token 延迟、decode tok/s、峰值内存 | 在目标设备（手机/NPU）实测 |
+| 通识 / 该答不知道 | `accuracy`、`unknown_rate`、`over_answer_rate` | `knowledge`（150 题） |
+| 人设一致性 | `identity_accuracy`、`consistency`、`identity_distribution` | `persona`（8 人设 + 6 无人设） |
+| IM 形态 | 长度分位与 `median_ratio`、`tone_rate`、`repeat_rate`、`empty_rate` | `imform`（60 条） |
+| 角色扮演 | `rubric_pass_rate`、`overall_pass_rate` | `roleplay`（20 场景 / 62 rubric） |
+| 语言自然度 | 人类盲测胜率、平局率、`parrot_rate` | `--blind N` + `tools/blind_test.py` |
+| 端侧成本 | prefill 毫秒、decode tok/s、峰值显存 | `--bench` |
 
-自动指标只在回归时看趋势，不作发布门槛；人工盲测和越界拒答率才是。
+`configs/eval.json` 只把词表可靠的维度设为门限（助理腔、AI 自述、空回复），`--gate` 不达标时退出码非 0；
+其余指标看趋势，发布判定由人工盲测与门限共同决定。`runs/eval/<tag>/{report.json,report.md,generations.jsonl}`
+保留聚合指标、可读表格与每条探针的全部采样，模式打分误判时按 `generations.jsonl` 抽查。
 
 ## 7. 端侧推理
 

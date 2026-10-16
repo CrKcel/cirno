@@ -1,0 +1,150 @@
+{"kind": "knowledge", "id": "k001", "category": "fact", "prompt": "一年有多少个月呀？", "any_of": ["12", "十二"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k002", "category": "fact", "prompt": "一个星期有几天？", "any_of": ["7", "七"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k003", "category": "fact", "prompt": "一天有几个小时来着？", "any_of": ["24", "二十四"], "not_any_of": ["12", "十二"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k004", "category": "fact", "prompt": "一个小时有多少分钟？", "any_of": ["60", "六十"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k005", "category": "fact", "prompt": "太阳是从哪边升起来的？", "any_of": ["东"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k006", "category": "fact", "prompt": "太阳从哪边落下去？", "any_of": ["西"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k007", "category": "fact", "prompt": "水在多少度会结冰？", "any_of": ["0", "零"], "not_any_of": ["100", "一百"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k008", "category": "fact", "prompt": "水一般烧到多少度会开？", "any_of": ["100", "一百"], "not_any_of": ["零"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k009", "category": "fact", "prompt": "一年有几个季节呀？", "any_of": ["4", "四"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k010", "category": "fact", "prompt": "中国的首都是哪座城市？", "any_of": ["北京"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k011", "category": "fact", "prompt": "法国的首都是哪里？", "any_of": ["巴黎"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k012", "category": "fact", "prompt": "日本的首都是哪座城市？", "any_of": ["东京"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k013", "category": "fact", "prompt": "美国的首都是什么地方？", "any_of": ["华盛顿"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k014", "category": "fact", "prompt": "世界上最高的山峰叫什么名字？", "any_of": ["珠穆朗玛"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k015", "category": "fact", "prompt": "世界上最大的海洋是哪个？", "any_of": ["太平洋"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k016", "category": "fact", "prompt": "世界上面积最大的国家是哪个？", "any_of": ["俄罗斯"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k017", "category": "fact", "prompt": "世界上最大的沙漠叫什么？", "any_of": ["撒哈拉"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k018", "category": "fact", "prompt": "离太阳最近的行星是哪一颗？", "any_of": ["水星"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k019", "category": "fact", "prompt": "我们生活在哪颗星球上？", "any_of": ["地球"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k020", "category": "fact", "prompt": "月亮是绕着哪颗星球转的？", "any_of": ["地球"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k021", "category": "fact", "prompt": "地球绕着哪颗恒星转？", "any_of": ["太阳"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k022", "category": "fact", "prompt": "一年里白天最长的那天叫什么？", "any_of": ["夏至"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k023", "category": "fact", "prompt": "春天过去之后是什么季节？", "any_of": ["夏"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k024", "category": "fact", "prompt": "冬天过去之后是什么季节？", "any_of": ["春"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k025", "category": "fact", "prompt": "人身体里的血一般是什么颜色？", "any_of": ["红"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k026", "category": "fact", "prompt": "熟透的香蕉通常是什么颜色？", "any_of": ["黄"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k027", "category": "fact", "prompt": "大熊猫身上有哪两种颜色？", "any_of": ["黑", "白"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k028", "category": "fact", "prompt": "路边的小草一般是什么颜色？", "any_of": ["绿"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k029", "category": "fact", "prompt": "大晴天的天空是什么颜色？", "any_of": ["蓝"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k030", "category": "fact", "prompt": "刚下的雪是什么颜色的？", "any_of": ["白"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k031", "category": "fact", "prompt": "一年里有几个月是三十一天？", "any_of": ["7", "七"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k032", "category": "fact", "prompt": "我国的国宝动物是什么？", "any_of": ["熊猫"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k033", "category": "fact", "prompt": "兔子最爱吃什么蔬菜？", "any_of": ["萝卜"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k034", "category": "fact", "prompt": "猫一般是怎么叫的？", "any_of": ["喵"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k035", "category": "fact", "prompt": "狗一般是怎么叫的？", "any_of": ["汪"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k036", "category": "fact", "prompt": "小蜜蜂采花酿出来的是什么？", "any_of": ["蜂蜜", "蜜"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k037", "category": "fact", "prompt": "我们喝的牛奶一般是哪种动物产的？", "any_of": ["牛"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k038", "category": "fact", "prompt": "鸡蛋是谁生下来的？", "any_of": ["鸡"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k039", "category": "fact", "prompt": "米饭是用什么东西煮出来的？", "any_of": ["米", "稻"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k040", "category": "fact", "prompt": "面包主要是用什么做的？", "any_of": ["面"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k041", "category": "fact", "prompt": "中国最长的那条河叫什么？", "any_of": ["长江"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k042", "category": "fact", "prompt": "中国的第二长河是哪条？", "any_of": ["黄河"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k043", "category": "fact", "prompt": "万里长城在哪个国家？", "any_of": ["中国"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k044", "category": "fact", "prompt": "埃及金字塔在哪个国家？", "any_of": ["埃及"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k045", "category": "fact", "prompt": "埃菲尔铁塔在哪个国家？", "any_of": ["法国"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k046", "category": "fact", "prompt": "自由女神像在哪个国家？", "any_of": ["美国"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k047", "category": "fact", "prompt": "大熊猫平时主要吃什么？", "any_of": ["竹子"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k048", "category": "fact", "prompt": "人体最大的器官是什么？", "any_of": ["皮肤"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k049", "category": "fact", "prompt": "人是用哪个器官呼吸的？", "any_of": ["肺", "鼻"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k050", "category": "fact", "prompt": "人靠哪个器官来思考？", "any_of": ["大脑", "脑"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k051", "category": "fact", "prompt": "冰块化掉以后会变成什么？", "any_of": ["水"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k052", "category": "fact", "prompt": "冬天很冷的时候天上会飘下什么？", "any_of": ["雪"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k053", "category": "fact", "prompt": "春天很多树上会开什么？", "any_of": ["花"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k054", "category": "fact", "prompt": "一年里最后一个月是几月？", "any_of": ["12", "十二"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k055", "category": "fact", "prompt": "红绿灯里表示停下来的那个颜色是什么？", "any_of": ["红"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k056", "category": "fact", "prompt": "正常人有几只眼睛？", "any_of": ["2", "两"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k057", "category": "fact", "prompt": "中秋节一般要吃什么点心？", "any_of": ["月饼"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k058", "category": "fact", "prompt": "中国最重要的传统节日是哪个？", "any_of": ["春节", "新年"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k059", "category": "fact", "prompt": "端午节一般要吃什么？", "any_of": ["粽子"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k060", "category": "fact", "prompt": "元宵节那天一般要吃什么？", "any_of": ["元宵", "汤圆"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k061", "category": "weather", "prompt": "下雨天出门要带什么呀？", "any_of": ["伞"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k062", "category": "weather", "prompt": "下雨的时候天上会掉下来什么？", "any_of": ["雨"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k063", "category": "weather", "prompt": "冬天冷不冷啊？", "any_of": ["冷"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k064", "category": "weather", "prompt": "夏天热不热？", "any_of": ["热"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k065", "category": "weather", "prompt": "刮台风的时候最好待在哪儿？", "any_of": ["家", "室内", "屋里"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k066", "category": "weather", "prompt": "太阳很大、天上没云，这种天气叫什么？", "any_of": ["晴"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k067", "category": "weather", "prompt": "天上乌云很多的时候，多半要下什么？", "any_of": ["雨"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k068", "category": "weather", "prompt": "冬天河面结了冰，走在上面滑不滑？", "any_of": ["滑"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k069", "category": "weather", "prompt": "天气很热的时候应该多喝什么？", "any_of": ["水"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k070", "category": "weather", "prompt": "又打雷又下大雨的天气叫什么？", "any_of": ["雷阵雨", "雷雨"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k071", "category": "weather", "prompt": "冬天穿的那种厚厚的衣服叫什么？", "any_of": ["棉衣", "羽绒服", "棉袄", "毛衣"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k072", "category": "weather", "prompt": "夏天太阳太晒，出门前要涂什么？", "any_of": ["防晒"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k073", "category": "weather", "prompt": "在有风的地方放的那种带线的玩具是什么？", "any_of": ["风筝"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k074", "category": "weather", "prompt": "彩虹一般是在什么时候出现的？", "any_of": ["雨后", "雨停", "下过雨"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k075", "category": "weather", "prompt": "雾天开车要注意什么？", "any_of": ["慢", "减速"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k076", "category": "weather", "prompt": "天气太热怕中暑，应该待在什么地方？", "any_of": ["阴凉", "空调", "室内"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k077", "category": "weather", "prompt": "下暴雨的时候，路上低洼的地方容易积什么？", "any_of": ["水"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k078", "category": "weather", "prompt": "冬天从外面进屋，眼镜片上会起什么？", "any_of": ["雾"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k079", "category": "weather", "prompt": "雪化了以后，路面是湿的还是干的？", "any_of": ["湿"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k080", "category": "weather", "prompt": "夏天家里最常见的降温电器是什么？", "any_of": ["空调", "风扇"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k081", "category": "everyday", "prompt": "肚子饿了应该做什么？", "any_of": ["吃"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k082", "category": "everyday", "prompt": "口渴了应该做什么？", "any_of": ["喝"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k083", "category": "everyday", "prompt": "一天一般要吃几顿饭？", "any_of": ["3", "三"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k084", "category": "everyday", "prompt": "困得不行了应该去做什么？", "any_of": ["睡"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k085", "category": "everyday", "prompt": "早上起床后要做的清洁是什么？", "any_of": ["刷牙", "洗脸"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k086", "category": "everyday", "prompt": "睡觉一般要躺在哪里？", "any_of": ["床"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k087", "category": "everyday", "prompt": "吃饭之前应该先做什么？", "any_of": ["洗手"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k088", "category": "everyday", "prompt": "上完厕所之后要做什么？", "any_of": ["洗手"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k089", "category": "everyday", "prompt": "出门之前脚上要穿什么？", "any_of": ["鞋"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k090", "category": "everyday", "prompt": "手机快没电了应该做什么？", "any_of": ["充电"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k091", "category": "everyday", "prompt": "天黑了屋里看不清，要开什么？", "any_of": ["灯"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k092", "category": "everyday", "prompt": "东西掉在地上应该怎么做？", "any_of": ["捡"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k093", "category": "everyday", "prompt": "用完的垃圾应该扔到哪里？", "any_of": ["垃圾桶", "垃圾箱"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k094", "category": "everyday", "prompt": "过马路的时候要先看什么？", "any_of": ["红绿灯", "信号灯", "绿灯"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k095", "category": "everyday", "prompt": "过马路一般要走哪里？", "any_of": ["斑马线", "人行道"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k096", "category": "everyday", "prompt": "客人来家里了，应该说哪句话？", "any_of": ["欢迎"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k097", "category": "everyday", "prompt": "别人帮了你，应该说什么？", "any_of": ["谢谢"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k098", "category": "everyday", "prompt": "做错事了应该跟人说什么？", "any_of": ["对不起", "抱歉"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k099", "category": "everyday", "prompt": "别人在睡觉，你说话要怎么样？", "any_of": ["小声", "轻"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k100", "category": "everyday", "prompt": "吃饭夹菜一般用什么？", "any_of": ["筷子"], "expect_unknown": false}
+{"kind": "knowledge", "id": "k101", "category": "unknown", "prompt": "我昨天是几点睡的？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k102", "category": "unknown", "prompt": "我现在身上穿的衣服是什么颜色的？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k103", "category": "unknown", "prompt": "我家养的那只猫叫什么名字？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k104", "category": "unknown", "prompt": "我口袋里现在有多少钱？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k105", "category": "unknown", "prompt": "我手机的锁屏密码是多少？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k106", "category": "unknown", "prompt": "我最喜欢的歌手是谁？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k107", "category": "unknown", "prompt": "我上个月工资发了多少？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k108", "category": "unknown", "prompt": "我书桌上有几本书？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k109", "category": "unknown", "prompt": "我今天早饭吃了什么？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k110", "category": "unknown", "prompt": "我最好的朋友姓什么？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k111", "category": "unknown", "prompt": "我今年多大了？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k112", "category": "unknown", "prompt": "我现在人在哪个城市？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k113", "category": "unknown", "prompt": "我身高是多少厘米？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k114", "category": "unknown", "prompt": "我电脑里存了多少张照片？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k115", "category": "unknown", "prompt": "我养的那盆花是什么品种？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k116", "category": "unknown", "prompt": "我上周看的电影叫什么名字？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k117", "category": "unknown", "prompt": "我明天打算几点起床？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k118", "category": "unknown", "prompt": "明天的天气怎么样？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k119", "category": "unknown", "prompt": "北京现在的实时气温是多少度？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k120", "category": "unknown", "prompt": "今天的股票大盘收盘是多少点？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k121", "category": "unknown", "prompt": "现在美元兑人民币的汇率是多少？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k122", "category": "unknown", "prompt": "昨晚那场足球比赛谁赢了？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k123", "category": "unknown", "prompt": "现在几点了？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k124", "category": "unknown", "prompt": "今天热搜榜第一名是什么？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k125", "category": "unknown", "prompt": "这会儿路上堵不堵车？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k126", "category": "unknown", "prompt": "现在比特币的价格是多少？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k127", "category": "unknown", "prompt": "今天金价多少钱一克？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k128", "category": "unknown", "prompt": "下一趟地铁还有几分钟到站？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k129", "category": "unknown", "prompt": "外面现在正在下雨吗？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k130", "category": "unknown", "prompt": "今天有什么新闻？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k131", "category": "unknown", "prompt": "这周末商场有什么促销活动？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k132", "category": "unknown", "prompt": "现在的油价是多少钱一升？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k133", "category": "unknown", "prompt": "我点的外卖还有多久送到？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k134", "category": "unknown", "prompt": "今晚月亮几点升起来？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k135", "category": "unknown", "prompt": "我明年高考能考多少分？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k136", "category": "unknown", "prompt": "我明天会遇到哪些人？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k137", "category": "unknown", "prompt": "我会在几岁结婚？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k138", "category": "unknown", "prompt": "下个月彩票的中奖号码是多少？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k139", "category": "unknown", "prompt": "我以后会做什么工作？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k140", "category": "unknown", "prompt": "我明天会不会生病？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k141", "category": "unknown", "prompt": "我明年还能再长高多少厘米？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k142", "category": "unknown", "prompt": "我以后的生活会幸福吗？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k143", "category": "unknown", "prompt": "我下次考试能排第几名？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k144", "category": "unknown", "prompt": "我家那只猫还能活多少年？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k145", "category": "unknown", "prompt": "我将来会在哪个城市定居？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k146", "category": "unknown", "prompt": "十年以后我还会用这款手机吗？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k147", "category": "unknown", "prompt": "我明天的心情会怎么样？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k148", "category": "unknown", "prompt": "明年这里会不会发生地震？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k149", "category": "unknown", "prompt": "我这辈子一共能赚到多少钱？", "expect_unknown": true}
+{"kind": "knowledge", "id": "k150", "category": "unknown", "prompt": "我明天出门会不会忘记带钥匙？", "expect_unknown": true}

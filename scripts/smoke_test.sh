@@ -73,8 +73,34 @@ drop "$WORK/sft/last" "$WORK/align/final"
 step 7-sample    "$PY" scripts/sample.py --model "$WORK/sft/final" --prompt "What color is the shape?" \
     --image "$WORK/data/images/00000.png" --max_new_tokens 8
 
+# 8. Evaluation is a separate pass over a checkpoint (doc/evaluation.md): it must score generation rather
+#    than ppl, cover every kind of probe and agree with its own --gate verdict.  The synthetic probes carry
+#    known answers, so a random-weight model still exercises the whole scoring path.
+rc=0
+"$PY" scripts/eval.py --model "$WORK/sft/final" --tokenizer "$WORK/tok" --out "$WORK/eval" \
+    --set knowledge="$WORK/data/eval_knowledge.jsonl" --set persona="$WORK/data/eval_persona.jsonl" \
+    --set imform="$WORK/data/eval_imform.jsonl" --set roleplay="$WORK/data/eval_roleplay.jsonl" \
+    --image_root "$WORK/data" --max_new_tokens 8 --bench --gate >"$WORK/8-eval.log" 2>&1 || rc=$?
+"$PY" - "$WORK/eval" "$rc" <<'EOF'
+import json, os, sys
+d, rc = sys.argv[1], int(sys.argv[2])
+report = json.load(open(os.path.join(d, "report.json"), encoding="utf-8"))
+assert set(report["sets"]) == {"knowledge", "persona", "imform", "roleplay"}, list(report["sets"])
+for name, block in report["sets"].items():
+    assert block["n_items"] > 0 and block["n_generations"] == block["n_items"] * block["sampling"]["samples"], block
+    assert block["skipped"] == 0 and block["metrics"]["n_samples"] == block["n_generations"], block
+rows = [json.loads(l) for l in open(os.path.join(d, "generations.jsonl"), encoding="utf-8") if l.strip()]
+assert len(rows) == sum(b["n_items"] for b in report["sets"].values()), len(rows)
+assert os.path.exists(os.path.join(d, "report.md")) and os.path.exists(os.path.join(d, "cost.json"))
+assert report["gates"]["checks"], "the config's gates produced no checks"
+assert rc == (0 if report["gates"]["passed"] else 1), (rc, report["gates"])
+print("  eval: four kinds scored, report/generations/cost written, --gate agrees with the report")
+EOF
+printf '  %3ds  %s\n' $((SECONDS - T0)) "8-eval"
+"$PY" tools/eval_table.py "$WORK/eval/report.json"
+
 echo
 echo "sample said: $(tail -1 "$WORK/7-sample.log")"
-echo "OK: pretrain + align + sft + sample all ran in $((SECONDS - T0))s"
+echo "OK: pretrain + align + sft + sample + eval all ran in $((SECONDS - T0))s"
 echo "    logs: $WORK/*.log   kept: $WORK/sft/final   ($(du -sh "$WORK" 2>/dev/null | cut -f1) on disk;"
 echo "    KEEP=1 bash scripts/smoke_test.sh keeps every stage's checkpoints instead)"

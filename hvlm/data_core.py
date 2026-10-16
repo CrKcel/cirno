@@ -202,15 +202,15 @@ def normalize_messages(rec):
     raise ValueError("record has neither 'messages' nor 'conversations' nor a known prompt/reply pair")
 
 
-def encode_conversation(encode, sp, messages, n_img_tokens, has_image, max_len):
-    """ChatML-style encoding with loss only on the imitated side's replies (role "self", + its <|im_end|>).
+def _encode_turns(encode, sp, messages, n_img_tokens, has_image, max_len, labels_on_self):
+    """Shared ChatML assembly; `labels_on_self` decides whether the self turns are trainable.
 
     encode : callable str -> list[int]   (plain text, no special tokens added)
     sp     : dict with ids for im_start, im_end, vision_start, vision_end, image_pad
     The image block <|vision_start|> <|image_pad|> x n <|vision_end|> replaces the first '<image>' tag
     (or is put at the start of the first user turn when the record has an image but no tag).
     Returns (ids, labels, image_used).  Raises ValueError for unusable samples (image cut by truncation, or
-    no trainable token left)."""
+    no trainable token left when the self turns carry labels)."""
     ids, labels = [], []
     image_used = False
     nl = encode("\n")
@@ -222,7 +222,7 @@ def encode_conversation(encode, sp, messages, n_img_tokens, has_image, max_len):
         if role == "self":
             body = encode(content) + [sp["im_end"]]
             ids += body
-            labels += body
+            labels += body if labels_on_self else [-100] * len(body)
             ids += nl
             labels += [-100] * len(nl)
             continue
@@ -239,15 +239,36 @@ def encode_conversation(encode, sp, messages, n_img_tokens, has_image, max_len):
         body += [sp["im_end"]] + nl
         ids += body
         labels += [-100] * len(body)
-    ids, labels = ids[:max_len], labels[:max_len]
+    if max_len is not None:
+        ids, labels = ids[:max_len], labels[:max_len]
     n_pad = sum(1 for t in ids if t == sp["image_pad"])
     if image_used and n_pad != n_img_tokens:
         raise ValueError("image block truncated")
     if not image_used and n_pad:
         raise ValueError("stray image tokens")
-    if all(l == -100 for l in labels):
+    if labels_on_self and all(l == -100 for l in labels):
         raise ValueError("no trainable tokens")
     return ids, labels, image_used
+
+
+def encode_conversation(encode, sp, messages, n_img_tokens, has_image, max_len):
+    """ChatML-style encoding with loss only on the imitated side's replies (role "self", + its <|im_end|>).
+
+    This is the training-time encoding; `encode_prompt` below is its loss-free, generation-time prefix for
+    the same messages (see the invariant its test asserts)."""
+    return _encode_turns(encode, sp, messages, n_img_tokens, has_image, max_len, labels_on_self=True)
+
+
+def encode_prompt(encode, sp, messages, n_img_tokens, has_image, max_len=None):
+    """Context ids for generation: every message as prompt, then the opening `self` turn head.
+
+    The model then continues from there, which is the same position training predicts from, so an eval
+    prompt and a training sample of the same conversation agree token for token (scripts/sample.py and
+    scripts/eval.py both build their inputs here instead of duplicating the ChatML layout)."""
+    ids, _labels, _used = _encode_turns(encode, sp, messages, n_img_tokens, has_image, max_len,
+                                        labels_on_self=False)
+    ids = ids + [sp["im_start"]] + encode("self\n")
+    return ids[:max_len] if max_len else ids
 
 
 def collate_sequences(items, pad_id, image_pad_id, grid):
