@@ -61,8 +61,8 @@
   "align": {
     "stage": "align",
     "seq_len": 512,
-    "micro_batch": 8,
-    "grad_accum": 32,
+    "micro_batch": 4,
+    "grad_accum": 64,
     "lr": 0.0005,
     "warmup": 0.05,
     "epochs": 1,
@@ -72,8 +72,8 @@
   "sft": {
     "stage": "sft",
     "seq_len": 1024,
-    "micro_batch": 8,
-    "grad_accum": 16,
+    "micro_batch": 2,
+    "grad_accum": 64,
     "lr": 0.0002,
     "warmup": 0.03,
     "epochs": 2,

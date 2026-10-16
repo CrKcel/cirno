@@ -140,19 +140,15 @@ python tools/plan_mix.py --plan configs/pretrain_plan.json --write runs/pretrain
 #    the shape all come from the resolved plan, and the learning rate is one WSD curve over the whole
 #    5.39B tokens (warmup 2%, flat middle, final 20% decay), so there is no --decay_frac 0 bookkeeping
 #    and no hand-maintained cumulative token count to get wrong.
-#    Measured on an 8 GB card at 524k tokens/step (doc/architecture.md 3.2, absolute numbers differ per
+#    Measured on an 8 GB card at 524k tokens/step (doc/architecture.md 3.3, absolute numbers differ per
 #    session):
-#       mb16 x accum32   seq 1024         6938 tok/s   3.9 GB
-#       mb2  x accum256  seq 1024        13042 tok/s   5.1 GB   <- phases B and C
-#       mb4  x accum128  seq 1024 --compile  18143 tok/s   5.2 GB
-#       mb2  x accum128  seq 2048         4785 tok/s   2.8 GB   <- phase A (the probe turns
-#                                                                  checkpointing on; with it off this
-#                                                                  shape OOMs).  Per token this is the same
-#                                                                  cost as seq 1024 x mb 2 (4575 tok/s),
-#                                                                  i.e. 2048 is nearly free.
+#       mb2  x accum256  seq 1024            11174 tok/s   4.9 GB
+#       mb2  x accum256  seq 1024 --compile  12820 tok/s   3.3 GB   <- phases B and C
+#       mb4  x accum128  seq 1024 --compile  14753 tok/s   4.8 GB
+#       mb2  x accum128  seq 2048 --compile  14051 tok/s   4.8 GB   <- phase A
 #    Re-measure with:
 #      python tools/measure_batch.py --stage pretrain [--gdn_impl fla|torch] [--precision bf16|fp16|fp32]
-#                                    [--no_grad_ckpt] [--compile]
+#                                    [--compile]
 python scripts/train.py --stage pretrain --plan runs/pretrain/plan.resolved.json --phase A \
     --tokenizer tokenizer --out_dir runs/pretrain --compile --resume
 python scripts/train.py --stage pretrain --plan runs/pretrain/plan.resolved.json --phase B \

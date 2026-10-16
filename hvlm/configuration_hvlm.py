@@ -84,7 +84,6 @@ class HVLMConfig(_BaseConfig):
         mtp_num_layers=1,
         mtp_loss_weight=0.3,
         ce_chunk_size=2048,
-        ce_checkpoint=True,
         image_token_id=5,
         vision_start_token_id=3,
         vision_end_token_id=4,
@@ -131,9 +130,6 @@ class HVLMConfig(_BaseConfig):
         self.mtp_num_layers = mtp_num_layers
         self.mtp_loss_weight = mtp_loss_weight
         self.ce_chunk_size = ce_chunk_size
-        # recompute each CE chunk in the backward pass (memory-down / compute-up); the trainer's probe
-        # turns it off when the retained logits fit (see scripts/train.py)
-        self.ce_checkpoint = ce_checkpoint
         self.image_token_id = image_token_id
         self.vision_start_token_id = vision_start_token_id
         self.vision_end_token_id = vision_end_token_id

@@ -113,7 +113,7 @@ To skip the vision stage (text-only chat), drop the `align` line and use
 Useful flags beyond the per-stage defaults: `--compile` for speed, `--seq_len / --micro_batch /
 --grad_accum` for the shape, `--max_mem_gb 0` to drop the allocator cap, and `--resume` to continue
 (with the data order and GradScaler state preserved). Precision and kernel switches (`--precision`,
-`--gdn_impl`, `--grad_ckpt`, `--ce_ckpt`, `--tf32`) are documented in `doc/architecture.md` §3.
+`--gdn_impl`, `--tf32`) are documented in `doc/architecture.md` §3.
 `--plan / --phase` read the resolved recipe (phase budget, mixture, and one WSD curve over the whole
 token budget); `--mm_weights` sets the align/SFT source mixture. Monitoring switches
 (`--no_monitor`, `--no_intervention`, `--early_stop_patience`, `--lr_backoff`) are documented in
@@ -124,16 +124,13 @@ token budget); `--mm_weights` sets the align/SFT source mixture. Monitoring swit
 1. `tools/check_algorithms_numpy.py`, `tools/check_data_numpy.py`, `tools/check_local_data.py`,
    `tools/check_monitor.py`, `tools/check_eval.py`, `tools/estimate.py` — no torch needed; all pass in the
    sandbox.
-2. `tests/test_model.py` — 28 tests, ~19 s on the RTX 4060 Laptop (GPU paths included). Coverage:
+2. `tests/test_model.py` — 25 tests, ~19 s on the RTX 4060 Laptop (GPU paths included). Coverage:
    chunked delta rule ≡ recurrence (forward and gradients), parameter count matches the estimator,
    causality (including images), right padding is inert, MTP label alignment, chunked CE ≡ full CE
-   (loss and gradients), gradient/CE checkpoint parity, bf16 autocast, align-stage trains only the
-   ViT, save/load round-trip, tiny-model overfit. Kernel and precision tests:
-   `test_gdn_impl_dispatch` (`auto` must fall back to torch on CPU or without fla),
-   `test_fla_matches_torch_impl` (Triton kernels vs the fp32 reference, error bound),
-   `test_ce_checkpoint_only_changes_recompute` (`--ce_ckpt` only moves the recompute: loss and
-   gradients bit-identical), `test_probe_batch_is_a_valid_model_input` (the memory probe's synthetic
-   batch must really be a valid model input). Evaluation tests:
+   (loss and gradients), bf16 autocast, align-stage trains only the ViT, save/load round-trip,
+   tiny-model overfit. Kernel and precision tests: `test_gdn_impl_dispatch` (`auto` must fall back to
+   torch on CPU or without fla), `test_fla_matches_torch_impl` (Triton kernels vs the fp32 reference,
+   error bound). Evaluation tests:
    `test_eval_prompt_matches_training_encoding` (the generation prompt is the training-time prefix:
    eval and training cannot drift apart) and `test_eval_generation_is_reproducible`
    (same seed → same sample, so report.json's numbers can be reproduced). With a GPU it also measures

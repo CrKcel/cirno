@@ -26,9 +26,9 @@ from hvlm.monitor import HealthPolicy, MetricsLog, json_safe  # noqa: E402
 STAGE_DEFAULTS = {
     "pretrain": dict(lr=1e-3, warmup=0.02, seq_len=1024, micro_batch=2, grad_accum=256, train="llm",
                      mtp_weight=0.3, vit_lr_mult=1.0),
-    "align":    dict(lr=5e-4, warmup=0.05, seq_len=512, micro_batch=8, grad_accum=32, train="vit",
+    "align":    dict(lr=5e-4, warmup=0.05, seq_len=512, micro_batch=4, grad_accum=64, train="vit",
                      mtp_weight=0.0, vit_lr_mult=1.0),
-    "sft":      dict(lr=2e-4, warmup=0.03, seq_len=1024, micro_batch=8, grad_accum=32, train="llm,vit",
+    "sft":      dict(lr=2e-4, warmup=0.03, seq_len=1024, micro_batch=2, grad_accum=128, train="llm,vit",
                      mtp_weight=0.1, vit_lr_mult=0.5),
 }
 
@@ -71,11 +71,11 @@ def build_parser():
     # budget
     ap.add_argument("--seq_len", type=int, default=None)
     ap.add_argument("--micro_batch", type=int, default=None,
-                    help="stage defaults: pretrain 2, align 8, sft 8; measured safe max on 8 GB with a "
-                         "desktop running is 24 @seq1024 and 12 @seq2048 (see doc/architecture.md 3.2, "
-                         "tools/measure_batch.py)")
+                    help="stage defaults: pretrain 2, align 4, sft 2; measured safe max on this 8 GB card "
+                         "is 2 @seq1024 (pretrain, plus --compile for 4 or for seq2048 x 2), 4 @seq512 "
+                         "(align) and 2 @seq1024 (sft) - see doc/architecture.md 3.3, tools/measure_batch.py")
     ap.add_argument("--grad_accum", type=int, default=None,
-                    help="stage defaults: pretrain 256, align 32, sft 32 (mb*accum*seq = 524k/131k/262k tokens per step)")
+                    help="stage defaults: pretrain 256, align 64, sft 128 (mb*accum*seq = 524k/131k/262k tokens per step)")
     ap.add_argument("--max_steps", type=int, default=None)
     ap.add_argument("--tokens", type=float, default=None, help="pretrain: total training tokens (alternative to --max_steps)")
     ap.add_argument("--epochs", type=float, default=None, help="align/sft: number of passes over the data")
@@ -100,20 +100,11 @@ def build_parser():
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--max_mem_gb", type=float, default=8.0,
                     help="hard cap on this process's CUDA memory, also bounded by what is free at start (0 = off)")
-    ap.add_argument("--grad_ckpt", choices=["auto", "on", "off"], default="auto",
-                    help="per-layer activation checkpointing: auto = off when a micro-batch of the "
-                         "configured shape fits without it (probed, costs one fwd/bwd), on otherwise")
-    ap.add_argument("--ce_ckpt", choices=["auto", "on", "off"], default="auto",
-                    help="recompute the vocab-head matmul in the CE backward: auto = off when the kept "
-                         "logits fit (worth ~10%%), on otherwise")
-    ap.add_argument("--no_grad_ckpt", action="store_true",
-                    help="deprecated alias for --grad_ckpt off")
     ap.add_argument("--compile", action="store_true",
-                    help="torch.compile the training forward (Inductor). Measured +48%% on an 8 GB laptop card "
-                         "(it also cuts activation memory by ~35%%, which is what lets --grad_ckpt auto turn "
-                         "checkpointing off at a larger micro_batch). The first step pays a one-off JIT cost "
-                         "(seconds to a minute; cached in TORCHINDUCTOR_CACHE_DIR, default /tmp/torchinductor_*). "
-                         "Falls back to eager if compilation fails")
+                    help="torch.compile the training forward (Inductor). Measured +48%% on an 8 GB laptop card. "
+                         "The first step pays a one-off JIT cost (seconds to a minute; cached in "
+                         "TORCHINDUCTOR_CACHE_DIR, default /tmp/torchinductor_*). Falls back to eager when "
+                         "Inductor is unavailable")
     ap.add_argument("--tf32", action="store_true",
                     help="allow TF32 for fp32 matmuls (off by default: the pure-PyTorch delta-rule core is an "
                          "fp32 island; harmless with --gdn_impl fla, where that core lives in the Triton kernel)")
@@ -187,8 +178,6 @@ def parse_args(argv=None):
             if "--data" not in argv:
                 a.data = ",".join(rec["data"])
             a.tokens = a.max_steps or rec["cum_end"]
-    if a.no_grad_ckpt:  # deprecated alias, kept so old command lines keep working
-        a.grad_ckpt = "off"
     if a.stage is None:
         ap.error("--stage is required unless --plan names a phase that carries one")
     d = STAGE_DEFAULTS[a.stage]
@@ -273,113 +262,18 @@ def count(model, trainable=False):
     return sum(p.numel() for p in model.parameters() if (p.requires_grad or not trainable))
 
 
-def probe_batch(model, device, micro_batch, seq_len, stage):
-    """A synthetic batch of exactly the shape the trainer will use, for the memory probe below."""
-    cfg = model.config
-    ids = torch.randint(8, cfg.vocab_size, (micro_batch, seq_len), device=device)
-    batch = dict(input_ids=ids, labels=ids)
-    if stage != "pretrain":  # make the vision tower take part, so its activations count too
-        vc = cfg.vision_config
-        n = vc.num_image_tokens
-        if seq_len < 4 + n + 2:
-            return None
-        ids[:, 2] = cfg.vision_start_token_id
-        ids[:, 3:3 + n] = cfg.image_token_id
-        ids[:, 3 + n] = cfg.vision_end_token_id
-        labels = ids.clone()
-        labels[:, :4 + n] = -100
-        batch = dict(input_ids=ids, labels=labels,
-                     pixel_values=torch.zeros(micro_batch, 3, vc.image_size, vc.image_size, device=device))
-    return batch
+def setup_compile(a, model):
+    """Wrap the training forward in torch.compile, or fall back to eager when Inductor is unavailable.
 
-
-def probe_step(fwd_model, batch, dtype_ctx, raw_model):
-    """One fwd+bwd of `batch` that leaves no gradients behind.  Raises like a normal training step."""
-    raw_model.zero_grad(set_to_none=True)
-    with dtype_ctx():
-        out = fwd_model(**batch)
-    if out.loss.requires_grad:
-        out.loss.backward()
-    raw_model.zero_grad(set_to_none=True)
-
-
-CKPT_HEADROOM_GB = 0.5  # allocator fragmentation + cuBLAS workspaces + the batch on its way to the GPU
-
-
-def probe_fits(model, fwd_model, device, dtype_ctx, a, budget_gb):
-    """One fwd+bwd of the real training shape; True when its peak leaves CKPT_HEADROOM_GB to spare.
-
-    The AdamW moments (2 fp32 per trainable parameter) do not exist until the first opt.step(), so a
-    stand-in buffer of exactly that size is held during the probe - without it the probe under-reports
-    by ~1.1 GB here and cheerfully approves a micro_batch that OOMs two steps later."""
-    batch = probe_batch(model, device, a.micro_batch, a.seq_len, a.stage)
-    if batch is None:
-        return None, "cannot probe (sequence too short for an image batch)"
-    n = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    torch.cuda.reset_peak_memory_stats()
-    dummy = torch.empty(2 * n, device=device, dtype=torch.float32)
+    Compilation is lazy: the first forward traces and compiles, so its cost lands in the first logged
+    step (the artifact is cached under TORCHINDUCTOR_CACHE_DIR across runs)."""
+    if not a.compile:
+        return model, "off"
     try:
-        probe_step(fwd_model, batch, dtype_ctx, model)
-        peak = torch.cuda.max_memory_reserved() / 1024 ** 3
-        why = f"peak {peak:.2f} GB vs {budget_gb:.2f} GB budget"
-        return peak + CKPT_HEADROOM_GB <= budget_gb, why
-    except torch.cuda.OutOfMemoryError:
-        return False, "probe OOM"
-    finally:
-        model.zero_grad(set_to_none=True)
-        del dummy, batch
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-
-
-def _candidates(a):
-    """(grad_ckpt, ce_ckpt) pairs to try, cheapest-first: every "off" is work not repeated in backward.
-
-    Both knobs are pure recompute-for-memory trades, so the only reason to switch either on is that the
-    configured micro_batch otherwise does not fit.  An explicit --grad_ckpt/--ce_ckpt pins that axis."""
-    grads = [False, True] if a.grad_ckpt == "auto" else [a.grad_ckpt == "on"]
-    ces = [False, True] if a.ce_ckpt == "auto" else [a.ce_ckpt == "on"]
-    return sorted(((g, c) for g in grads for c in ces), key=lambda gc: (gc[0], gc[1]))
-
-
-def setup_execution(a, model, device, dtype_ctx, budget_gb):
-    """Pick activation/CE checkpointing and (optionally) torch.compile by probing the real shape.
-
-    Both checkpointing switches are mathematically free but repeat work in the backward pass (whole
-    layers, and the vocab-head matmul), which on a power-limited card is exactly the compute worth not
-    doing.  torch.compile fuses the elementwise chains and drops activation memory by ~35%, so it can
-    turn a micro_batch that needs checkpointing into one that does not - hence probing the compiled
-    graph, not just the eager one.  Each candidate costs one probe (one Inductor trace when compiled)."""
-    fwd_model, compile_msg, compiled = model, "off", False
-    ckpt_on = ce_on = True
-    label = "grad_ckpt on, ce_ckpt on (no CUDA budget to probe against)"
-    for ckpt_on, ce_on in _candidates(a):
-        model.gradient_checkpointing_enable() if ckpt_on else model.gradient_checkpointing_disable()
-        model.ce_checkpoint = ce_on
-        if a.compile and not compiled:
-            try:
-                fwd_model = torch.compile(model, dynamic=False)
-            except Exception as exc:  # pragma: no cover - depends on the local toolchain
-                fwd_model, compile_msg = model, f"unavailable ({type(exc).__name__}: {exc})"
-            else:
-                compiled = True
-        if budget_gb is None:  # CPU: nothing to probe, keep the conservative flags
-            break
-        t0 = time.time()
-        fits, why = probe_fits(model, fwd_model, device, dtype_ctx, a, budget_gb)
-        if compiled:
-            compile_msg = f"on (first step {time.time() - t0:.0f}s, cached afterwards)"
-        label = (f"grad_ckpt {'on' if ckpt_on else 'off'}, ce_ckpt {'on' if ce_on else 'off'} "
-                 f"(auto: {why})")
-        if fits or (ckpt_on and ce_on):  # accepted, or the most conservative candidate anyway
-            break
-    if a.grad_ckpt != "auto":  # an explicit choice wins over whatever the probe picked
-        ckpt_on = a.grad_ckpt == "on"
-    if a.ce_ckpt != "auto":
-        ce_on = a.ce_ckpt == "on"
-    model.gradient_checkpointing_enable() if ckpt_on else model.gradient_checkpointing_disable()
-    model.ce_checkpoint = ce_on
-    return fwd_model, ckpt_on, ce_on, label, compile_msg
+        fwd_model = torch.compile(model, dynamic=False)
+    except Exception as exc:  # pragma: no cover - depends on the local toolchain
+        return model, f"unavailable ({type(exc).__name__}: {exc})"
+    return fwd_model, "on (the first logged step includes the one-off JIT)"
 
 
 @torch.no_grad()
@@ -433,7 +327,7 @@ def main():
     torch.manual_seed(a.seed)
     device = torch.device(a.device)
     cuda = device.type == "cuda"
-    budget_gb = None  # CUDA memory this process may use; drives the checkpointing probe
+    budget_gb = None  # CUDA memory this process may use; feeds the allocator cap and the health policy
     if cuda:
         if a.tf32:
             torch.backends.cuda.matmul.allow_tf32 = True
@@ -506,9 +400,7 @@ def main():
     model.to(device)
     set_trainable(model, a.train)
     model.train()
-    fwd_model, ckpt_on, ce_on, ckpt_label, compile_msg = setup_execution(a, model, device, dtype_ctx, budget_gb)
-    model.config.ce_checkpoint = ce_on  # record it, like the resolved gdn_impl
-    print(f"checkpointing: {ckpt_label}")
+    fwd_model, compile_msg = setup_compile(a, model)
     print(f"torch.compile: {compile_msg}")
     vc = model.config.vision_config
     print(f"params: total {count(model) / 1e6:.1f}M, trainable {count(model, True) / 1e6:.1f}M "

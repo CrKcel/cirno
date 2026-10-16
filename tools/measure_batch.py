@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """Measure peak GPU memory and throughput for (seq_len, micro_batch) on this machine.
 
-Mirrors scripts/train.py: fp32 weights, autocast (--precision), per-layer checkpointing, fused AdamW, and
-the Gated DeltaNet kernel selected by --gdn_impl.  Run it once per (precision, kernel) pair you intend to
-train with - the fla kernels change both the memory ceiling and the throughput.
+Mirrors scripts/train.py: fp32 weights, autocast (--precision), fused AdamW, and the Gated DeltaNet
+kernel selected by --gdn_impl.  Run it once per (precision, kernel) pair you intend to train with -
+the fla kernels change both the memory ceiling and the throughput.
 """
 import argparse
 import json
@@ -50,7 +50,7 @@ def make_image_batch(mb, seq, cfg, device):
     return dict(input_ids=ids, labels=ids, pixel_values=px)
 
 
-def build_model(cfg, train, device, impl="auto", grad_ckpt=True, ce_ckpt=True, compile_=False):
+def build_model(cfg, train, device, impl="auto", compile_=False):
     torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
     m = HVLMForConditionalGeneration(HVLMConfig(**cfg)).to(device).train()
@@ -60,9 +60,6 @@ def build_model(cfg, train, device, impl="auto", grad_ckpt=True, ce_ckpt=True, c
         if hasattr(mod, "impl"):
             mod.impl = resolved
     set_trainable(m, train)
-    m.ce_checkpoint = ce_ckpt
-    if grad_ckpt:
-        m.gradient_checkpointing_enable()
     fwd = torch.compile(m, dynamic=False) if compile_ else m
     a = _A(lr=1e-4, weight_decay=0.1, vit_lr_mult=1.0 if train == "vit" else 0.5)
     opt = torch.optim.AdamW(build_param_groups(m, a), lr=a.lr, betas=(0.9, 0.95), eps=1e-8, fused=True)
@@ -123,8 +120,6 @@ def main():
                     help="Gated DeltaNet kernel, as in scripts/train.py")
     ap.add_argument("--precision", choices=["auto", "bf16", "fp16", "fp32"], default="auto",
                     help="autocast dtype, as in scripts/train.py")
-    ap.add_argument("--no_grad_ckpt", action="store_true", help="measure without per-layer checkpointing")
-    ap.add_argument("--no_ce_ckpt", action="store_true", help="measure without recomputing the CE head matmul")
     ap.add_argument("--compile", action="store_true", help="measure with torch.compile, as in scripts/train.py")
     ap.add_argument("--max_mem_gb", type=float, default=0.0,
                     help="hard cap on this process's CUDA memory, like train.py (0 = off)")
@@ -137,8 +132,7 @@ def main():
     device = torch.device("cuda")
     ac_dtype, precision_label = resolve_precision(args.precision, device)
     args.gdn_impl = resolve_impl(args.gdn_impl, device, strict=True)
-    print(f"precision {precision_label};  gdn_impl {args.gdn_impl};  grad_ckpt {not args.no_grad_ckpt};  "
-          f"ce_ckpt {not args.no_ce_ckpt};  torch.compile {args.compile}")
+    print(f"precision {precision_label};  gdn_impl {args.gdn_impl};  torch.compile {args.compile}")
     total = torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
     free, _ = torch.cuda.mem_get_info()
     free_gb = free / 1024 ** 3
@@ -167,13 +161,11 @@ def main():
             try:
                 if model is None:
                     model, opt, fwd = build_model(cfg, stage["train"], device, args.gdn_impl,
-                                                  grad_ckpt=not args.no_grad_ckpt,
-                                                  ce_ckpt=not args.no_ce_ckpt, compile_=args.compile)
+                                                  compile_=args.compile)
                 batch = make_batch(mb, seq, model.config, device) if stage["image"] else make_batch(mb, seq, device)
                 rec = trial(model, opt, batch, fwd=fwd, ac_dtype=ac_dtype, steps=args.steps)
                 rec.update(stage=args.stage, seq_len=seq, micro_batch=mb, tokens=seq * mb,
-                           precision=args.precision, gdn_impl=args.gdn_impl,
-                           grad_ckpt=not args.no_grad_ckpt, ce_ckpt=not args.no_ce_ckpt, compile=args.compile)
+                           precision=args.precision, gdn_impl=args.gdn_impl, compile=args.compile)
                 print(
                     f"  seq {seq:4d} x mb {mb:2d} ({seq * mb:6d} tok): "
                     f"alloc {rec['allocated_gb']:.2f}  reserved {rec['reserved_gb']:.2f}  "

@@ -25,8 +25,8 @@
 | 阶段 | `--train` | lr | warmup | seq_len | micro_batch | grad_accum | token/步 | mtp_weight | vit_lr_mult |
 |---|---|---|---|---|---|---|---|---|---|
 | `pretrain` | `llm` | 1e-3 | 2% | 1024 | 2 | 256 | 524k | 0.3 | 1.0 |
-| `align` | `vit` | 5e-4 | 5% | 512 | 8 | 32 | 131k | 0.0 | 1.0 |
-| `sft` | `llm,vit` | 2e-4 | 3% | 1024 | 8 | 32 | 262k | 0.1 | 0.5 |
+| `align` | `vit` | 5e-4 | 5% | 512 | 4 | 64 | 131k | 0.0 | 1.0 |
+| `sft` | `llm,vit` | 2e-4 | 3% | 1024 | 2 | 128 | 262k | 0.1 | 0.5 |
 
 `--train` 决定哪些模块可训练（`align` 阶段 LLM 冻结，所以该阶段没有可训练参数的 micro-batch 会被跳过
 反向）；`vit_lr_mult` 是 ViT 相对于 LLM 的学习率倍数。`sft` 是脚本里的历史阶段名，含义是**对话 /
@@ -118,8 +118,8 @@
   合计：**预算 5.39B = allocate 之和**；唯一被重复的是 chat（+202M），唯一没读完的是 wiki（−165M）。
 - **序列**：阶段 A 用 **2048** 训长文，B / C 用 1024（IM 对话天然短）。把多个会话拼进同一条序列时仍用
   `<|endoftext|>` 分隔，并尽量让一条序列 = 一个完整会话，模型才能看到会话边界。2048 不需要位置缩放
-  （`max_position_embeddings=4096`、`rope_theta=1e6`），代价也几乎为零：8 GB 卡上 seq 2048 × mb 2 与
-  seq 1024 × mb 2 的吞吐、显存同档（见 `scripts/run_pipeline.sh` 步骤 2 的实测表）。
+  （`max_position_embeddings=4096`、`rope_theta=1e6`），代价也几乎为零：8 GB 卡上（阶段 A 带 `--compile`）
+  seq 2048 × mb 2 与 seq 1024 × mb 2 的吞吐、显存同档（见 `scripts/run_pipeline.sh` 步骤 2 的实测表）。
 - **优化器**：AdamW（β=0.9/0.95，wd=0.1，不对 norm/bias/嵌入/`A_log`/`dt_bias` 做衰减），梯度裁剪 1.0。
 - **学习率**：峰值 1e-3，2% warmup，**一条以 token 为轴的全局 WSD**（恒定 → 最后 20% 线性降到 10%）。三段是三次
   `--resume` run，但调度由配方统一计算（`lr_at_tokens`：`tokens_done / budget_tokens`），不需要"中间段
@@ -344,4 +344,4 @@ python tools/eval_table.py runs/eval/*/report.json --baseline runs/eval/pretrain
 | `--mm_weights` | align/sft：每个 `--mm_data` 项的采样权重（不给则按行数） |
 | `--no_monitor` / `--no_intervention` | 关掉指标流 / 保留告警但不自动回退与早停 |
 | `--early_stop_patience` / `--spike_sigma` / `--lr_backoff` / `--backoff_steps` | 监控阈值与受控干预，见 [monitoring.md](monitoring.md) |
-| `--precision` / `--gdn_impl` / `--grad_ckpt` / `--ce_ckpt` / `--compile` / `--tf32` | 精度与 kernel |
+| `--precision` / `--gdn_impl` / `--compile` / `--tf32` | 精度与 kernel |

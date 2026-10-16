@@ -35,13 +35,12 @@ Cirno-130M 是一个约 130M 参数的混合视觉语言模型：20 层 decoder 
 1. **自动混合精度**（`--precision auto|bf16|fp16|fp32`）+ fp32 主权重：权重 + 梯度 + AdamW 两个状态
    = 16 B/参数 ≈ 2.0 GB（137M 参数）。`auto`（默认）在有原生 bf16 的卡（Ampere+）上用 bf16，否则用 fp16
    并自动挂 `GradScaler`（其状态随 checkpoint 一起存/取）；`fp32` 关闭 autocast，只用于排查数值问题。
-2. **按需检查点**（`--grad_ckpt auto` / `--ce_ckpt auto`，默认）：两者都是"重算换显存"——逐层激活检查点
-   在反向重算每层，CE 检查点重算词表头的矩阵乘。默认由启动时的一次真实形状探针决定：放得下就关掉，放不下
-   才开。用 `on` / `off` 可强制，`--no_grad_ckpt` 是 `--grad_ckpt off` 的旧别名。
-3. **分块交叉熵**（`chunked_cross_entropy`）：不构造完整 `[tokens, 32768]` logits，峰值为`ce_chunk_size × V`（配置项 `ce_chunk_size`，默认 2048）。
+2. **不做激活检查点**：反向直接用前向保存的激活，不重算。峰值因此由 `micro_batch × seq_len` 决定，
+   每步 token 数交给 `--grad_accum` 凑；`--compile` 融掉大部分中间量，可再放松约 35%（见 §3.3）。
+3. **分块交叉熵**（`chunked_cross_entropy`）：词表头 logits 分块算，不构造整块 `[tokens, 32768]` fp32；
+   反向保留的是 bf16 logits，fp32 的交叉熵中间量只在一个块内存在（`ce_chunk_size`，默认 2048）。
 4. **共享词表头**：MTP 与主头共用词嵌入，不额外占参数。
-5. **MTP 块检查点**。
-6. **`--max_mem_gb 8`**：分配器上限，超预算OOM。
+5. **`--max_mem_gb 8`**：分配器上限，超预算OOM。
 
 ### 3.2 精度与 kernel
 
@@ -53,19 +52,19 @@ Cirno-130M 是一个约 130M 参数的混合视觉语言模型：20 层 decoder 
 | `--tf32` | 允许 fp32 matmul 用 TF32。纯 PyTorch 的 delta rule 是 fp32 精度岛，默认关闭。 |
 
 数值上这些路径都与 fp32 参照对齐：fla 内核对 fp32 参照的前向最大差 ≈1e-3（普通 bf16 舍入），
-检查点开关与 `--compile` 只改变"何时重算/怎么融合"，loss 差 7.6e-4、梯度绝对差 ~4e-4。
+`--compile` 只改变算子融合方式，loss 差 7.6e-4、梯度绝对差 ~4e-4。
 
 ### 3.3 实测
 
-使用 RTX 4060 Laptop 8 GB，524k token/步
+使用 RTX 4060 Laptop 8 GB，524k token/步（`tools/measure_batch.py` 的 peak reserved 与 tok/s，绝对值随机器负载变化）
 
-| 用途 | 关键参数 | tok/s | 日志 `mem_gb` |
+| 用途 | 关键参数 | tok/s | peak reserved |
 |---|---|---|---|
-| 默认 | `--seq_len 1024 --micro_batch 2 --grad_accum 256` | **13042** | 5.09 GB |
-| 最快 | 同上但 `--micro_batch 4 --grad_accum 128 --compile` | **18143** | 5.16 GB |
-| 长上下文 | `--seq_len 2048 --micro_batch 2 --grad_accum 128 --compile` | 15066 | 4.79 GB |
+| 默认 | `--seq_len 1024 --micro_batch 2 --grad_accum 256` | 11174 | 4.87 GB |
+| 最快 | 同上但 `--micro_batch 4 --grad_accum 128 --compile` | **14753** | 4.80 GB |
+| 长上下文 | `--seq_len 2048 --micro_batch 2 --grad_accum 128 --compile` | 14051 | 4.80 GB |
 
-三者每步都是 524k token（`micro_batch × grad_accum × seq_len`）。**micro_batch 取"刚好小到不需要检查点"，
+三者每步都是 524k token（`micro_batch × grad_accum × seq_len`）。**micro_batch 取"刚好放得下"的最大值，
 每步 token 数交给 `--grad_accum` 凑**：显存与吞吐几乎只由 micro_batch × seq_len 决定，用
-`python tools/measure_batch.py --stage pretrain [--compile] [--no_grad_ckpt] [--no_ce_ckpt]` 可在本机重测，
+`python tools/measure_batch.py --stage pretrain [--compile]` 可在本机重测，
 它最后会打印各 seq_len 下的安全 micro_batch。

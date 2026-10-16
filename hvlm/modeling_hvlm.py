@@ -8,7 +8,7 @@ Conventions
   earlier positions and no attention mask is needed (`attention_mask` is accepted and ignored).
 * The residual stream stays in fp32 under bf16 autocast; matmuls run in bf16.
 * The LM head is tied to the embedding (no separate `lm_head` module); logits are only materialised when
-  `labels is None`.  With labels the loss is computed in checkpointed chunks (see `chunked_cross_entropy`).
+  `labels is None`.  With labels the loss is computed in chunks (see `chunked_cross_entropy`).
 """
 import math
 from dataclasses import dataclass
@@ -18,7 +18,6 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.checkpoint import checkpoint
 from transformers import PreTrainedModel
 from transformers.utils import ModelOutput
 
@@ -305,24 +304,21 @@ def _ce_chunk_sum(h, weight, y):
     return F.cross_entropy(F.linear(h, weight), y, reduction="sum")
 
 
-def chunked_cross_entropy(hidden, weight, labels, chunk_size=2048, use_checkpoint=True):
-    """Cross-entropy against the tied head without ever holding the full [N, V] logits.
+def chunked_cross_entropy(hidden, weight, labels, chunk_size=2048):
+    """Cross-entropy against the tied head without building one [N, V] fp32 tensor.
     hidden [N, d], weight [V, d], labels [N] (-100 ignored).  Returns (sum_of_losses, n_valid_tokens).
-    With use_checkpoint each chunk is recomputed in backward (peak logits memory = chunk_size * V) at the
-    cost of redoing the head matmul; without it every chunk's logits stay alive until their backward."""
+    Nothing is recomputed in backward, so the per-chunk logits stay alive for the head matmul's gradient:
+    the peak is the N x V logits (bf16 under autocast) plus one chunk's fp32 cross-entropy intermediates,
+    which is what `chunk_size` bounds."""
     valid = labels != -100
     hidden, labels = hidden[valid], labels[valid]
     n = int(labels.numel())
     if n == 0:
         return (hidden.sum() + weight.sum()) * 0.0, 0
     total = None
-    needs_grad = torch.is_grad_enabled() and (hidden.requires_grad or weight.requires_grad)
     for i in range(0, n, chunk_size):
         h, y = hidden[i:i + chunk_size], labels[i:i + chunk_size]
-        if use_checkpoint and needs_grad:
-            part = checkpoint(_ce_chunk_sum, h, weight, y, use_reentrant=False, preserve_rng_state=False)
-        else:
-            part = _ce_chunk_sum(h, weight, y)
+        part = _ce_chunk_sum(h, weight, y)
         total = part if total is None else total + part
     return total, n
 
@@ -341,7 +337,6 @@ class HVLMOutput(ModelOutput):
 class HVLMForConditionalGeneration(PreTrainedModel):
     config_class = HVLMConfig
     base_model_prefix = ""
-    supports_gradient_checkpointing = True
     _no_split_modules = ["DecoderLayer"]
 
     def __init__(self, config: HVLMConfig):
@@ -353,8 +348,6 @@ class HVLMForConditionalGeneration(PreTrainedModel):
         self.norm = RMSNorm(d, config.rms_norm_eps)
         self.visual = VisionTower(config.vision_config, d)
         self.mtp = nn.ModuleList([MTPModule(config) for _ in range(config.mtp_num_layers)])
-        self.use_checkpoint = False        # per-layer activation checkpointing (--grad_ckpt)
-        self.ce_checkpoint = getattr(config, "ce_checkpoint", True)  # recompute the head matmul in the CE
         self.post_init()
 
     # --- HF plumbing -------------------------------------------------------------------------
@@ -366,12 +359,6 @@ class HVLMForConditionalGeneration(PreTrainedModel):
 
     def get_output_embeddings(self):  # head is tied; there is no separate module
         return None
-
-    def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None, **kwargs):
-        self.use_checkpoint = True
-
-    def gradient_checkpointing_disable(self):
-        self.use_checkpoint = False
 
     @torch.no_grad()
     def _init_weights(self, module):
@@ -446,9 +433,8 @@ class HVLMForConditionalGeneration(PreTrainedModel):
         cos, sin = self.rotary(position_ids)
 
         h = inputs_embeds
-        ckpt = self.use_checkpoint and self.training and torch.is_grad_enabled()
         for layer in self.layers:
-            h = checkpoint(layer, h, cos, sin, use_reentrant=False, preserve_rng_state=False) if ckpt else layer(h, cos, sin)
+            h = layer(h, cos, sin)
         hn = self.norm(h)
         W = self.embed_tokens.weight
 
@@ -457,8 +443,8 @@ class HVLMForConditionalGeneration(PreTrainedModel):
                 hn = hn[:, -logits_to_keep:]
             return HVLMOutput(logits=F.linear(hn, W))
 
-        chunk, ce_ckpt = self.config.ce_chunk_size, self.ce_checkpoint
-        s, n = chunked_cross_entropy(hn[:, :-1].reshape(-1, d), W, labels[:, 1:].reshape(-1), chunk, ce_ckpt)
+        chunk = self.config.ce_chunk_size
+        s, n = chunked_cross_entropy(hn[:, :-1].reshape(-1, d), W, labels[:, 1:].reshape(-1), chunk)
         lm_loss = s / max(n, 1)
         loss, mtp_loss = lm_loss, None
 
@@ -469,9 +455,9 @@ class HVLMForConditionalGeneration(PreTrainedModel):
                     break
                 # position t (0 .. T-k-1) fuses prev[t] with the embedding of token t+k, predicts token t+k+1
                 args = (prev[:, :T - k], inputs_embeds[:, k:], cos[:, :T - k], sin[:, :T - k])
-                prev = checkpoint(mod, *args, use_reentrant=False, preserve_rng_state=False) if ckpt else mod(*args)
+                prev = mod(*args)
                 ms, mn = chunked_cross_entropy(prev[:, :-1].reshape(-1, d), W,
-                                               labels[:, k + 1:].reshape(-1), chunk, ce_ckpt)
+                                               labels[:, k + 1:].reshape(-1), chunk)
                 losses.append(ms / max(mn, 1))
             if losses:
                 mtp_loss = torch.stack(losses).mean()
