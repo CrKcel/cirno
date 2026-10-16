@@ -54,8 +54,8 @@ WIKI=(
     # moegirl first: the wiki cap is deliberately below the pool (~1.23B of ~1.43B), and baidu-baike is
     # ordered common entity -> rare entity, so the tokens this cap drops are its cold tail.  Listed
     # after baidu it would get nothing at all.
-    --source "jsonl:data/wiki/*.jsonl:text"                              # moegirl, wikitext stripped
-    --source "parquet:$SNAP/lars1234--baidu-baike-dataset/default/partial-train/*.parquet:-"
+    --source "jsonl:data/wiki/moegirl.jsonl:text"                        # moegirl, wikitext stripped
+    --source "parquet:$SNAP/lars1234--baidu-baike-dataset/default/partial-train/*.parquet:title+summary+sections"
 )
 ROLEPLAY=(
     --source "jsonl:$SNAP/shibing624--roleplay-zh/sharegpt_formatted_data-evol-gpt4.jsonl:-"
@@ -98,8 +98,8 @@ python scripts/train_tokenizer.py --out tokenizer --desegment \
     --source "jsonl:data/fiction/bcorpus_fiction.jsonl:text@1000" \
     --source "jsonl:data/fiction/chinesenovels.jsonl:text@17000" \
     --source "jsonl:data/fiction/interactive_novels.jsonl:text@27000" \
-    --source "jsonl:data/wiki/*.jsonl:text@38000" \
-    --source "parquet:$SNAP/lars1234--baidu-baike-dataset/default/partial-train/*.parquet:-@320000" \
+    --source "jsonl:data/wiki/moegirl.jsonl:text@38000" \
+    --source "parquet:$SNAP/lars1234--baidu-baike-dataset/default/partial-train/*.parquet:title+summary+sections@320000" \
     --source "parquet:$SNAP/wangrui6--Zhihu-KOL/data/train-*.parquet:RESPONSE@160000" \
     --source "jsonl:data/long/*.jsonl:text@1400"
 
@@ -110,7 +110,7 @@ python scripts/train_tokenizer.py --out tokenizer --desegment \
 #    correction - the weights come from those pools (tools/plan_mix.py) and no bin is asked for more than
 #    the recipe allocates it.  Re-derive every number afterwards with:
 #      python tools/plan_mix.py --plan configs/pretrain_plan.json
-python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/chat --max_tokens 1210000000 --val_tokens 4000000 "${CHAT[@]}"
+python scripts/prepare_data.py --tokenizer tokenizer --desegment --out data/bin/chat --max_tokens 940000000 --val_tokens 4000000 "${CHAT[@]}"
 python scripts/prepare_data.py --tokenizer tokenizer             --out data/bin/en_chat --max_tokens 1000000000 --val_tokens 1000000 "${EN[@]}"
 python scripts/prepare_data.py --tokenizer tokenizer             --out data/bin/fiction --max_tokens 1900000000 --val_tokens 2500000 "${FICTION[@]}"
 python scripts/prepare_data.py --tokenizer tokenizer             --out data/bin/long --max_tokens 660000000 --val_tokens 2000000 "${LONG[@]}"
@@ -127,10 +127,10 @@ python scripts/eval.py --tokenizer tokenizer --desegment --length-prior data/sft
 
 # 2. text pre-training: configs/pretrain_plan.json is the recipe, and plan_mix.py is what turns it into
 #    runnable phases.  The mixture is a schedule, not a constant - phase A spends the first 1.21B on
-#    long-form only at seq 2048, phase B brings dialogue in for 3.06B, phase C decays on chat + role-play
+#    long-form only at seq 2048, phase B brings dialogue in for 2.78B, phase C decays on chat + role-play
 #    for the last 1.08B - and the weights come out of the bins' measured pools, so they are derived
-#    rather than typed.  chat is the one bin read more than once (allocate 1.212B for a ~1.01B pool):
-#    the replay is what lifts dialogue from 34% to 37.8% of the budget, and it is concentrated in the
+#    rather than typed.  chat is the one bin read more than once (allocate 0.936B for a ~0.78B pool):
+#    the replay is what lifts dialogue from 31.3% to 34.4% of the budget, and it is concentrated in the
 #    anneal where the last gradients pick the style (doc/training.md 2).
 #    --print-commands also emits the align / SFT lines below.
 python tools/plan_mix.py --plan configs/pretrain_plan.json --write runs/pretrain/plan.resolved.json --print-commands
@@ -138,7 +138,7 @@ python tools/plan_mix.py --plan configs/pretrain_plan.json --write runs/pretrain
 #    Each phase is a separate run into the SAME --out_dir, so B and C pick up runs/pretrain/last and keep
 #    the optimizer, the sample counter and the data order.  --tokens, the phase boundary, the mixture and
 #    the shape all come from the resolved plan, and the learning rate is one WSD curve over the whole
-#    5.35B tokens (warmup 2%, flat middle, final 20% decay), so there is no --decay_frac 0 bookkeeping
+#    5.07B tokens (warmup 2%, flat middle, final 20% decay), so there is no --decay_frac 0 bookkeeping
 #    and no hand-maintained cumulative token count to get wrong.
 #    Measured on an 8 GB card at 524k tokens/step (doc/architecture.md 3.3, absolute numbers differ per
 #    session):

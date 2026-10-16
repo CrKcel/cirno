@@ -12,7 +12,8 @@ in Python/PyTorch, positioned as an **on-device chat / role-play model** rather 
   `positions.py`, `data_core.py`, `monitor.py` and `eval_core.py` are numpy-only and must stay importable
   without torch.
 - `scripts/` — CLI entry points: `train_tokenizer.py`, `prepare_data.py`, `prepare_local_data.py`
-  (turns the local dataset snapshot into the `data/<bucket>/*.jsonl` the recipe reads), `train.py`,
+  (turns the local dataset snapshot into the `data/<bucket>/*.jsonl` the recipe reads), `clean_ass.py`
+  (the `.ass`/`.ssa` subtitle corpus), `train.py`,
   `sample.py`, `eval.py` (generation-based evaluation of a checkpoint), plus the `smoke_test.sh` and
   `run_pipeline.sh` orchestration scripts.
 - `tools/` — standalone estimators and checks: `estimate.py`, `measure_batch.py`,
@@ -74,7 +75,7 @@ gates, and `doc/architecture.md` for the memory/throughput trade-offs.
 export CIRNO_SNAPSHOT=/mnt/data/LLM/hf      # local snapshot; every source is a path inside it
 python scripts/prepare_local_data.py --snapshot "$CIRNO_SNAPSHOT" --out data   # cleaning -> data/<bucket>/*.jsonl
 python scripts/train_tokenizer.py --out tokenizer --desegment --source "jsonl:data/chat/*.jsonl:text@8000"
-python scripts/prepare_data.py --tokenizer tokenizer --desegment --source "parquet:$CIRNO_SNAPSHOT/silver--lccc/base/train/*.parquet:dialog" --source "jsonl:data/chat/*.jsonl:text" --out data/bin/chat --max_tokens 1210000000 --val_tokens 4000000
+python scripts/prepare_data.py --tokenizer tokenizer --desegment --source "parquet:$CIRNO_SNAPSHOT/silver--lccc/base/train/*.parquet:dialog" --source "jsonl:data/chat/*.jsonl:text" --out data/bin/chat --max_tokens 940000000 --val_tokens 4000000
 # the recipe declares each phase's budget, shape and mixture; plan_mix.py fills in the weights from the
 # bins' meta.json and writes runs/pretrain/plan.resolved.json, which every phase then executes
 python tools/plan_mix.py --plan configs/pretrain_plan.json --write runs/pretrain/plan.resolved.json --print-commands

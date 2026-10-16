@@ -146,6 +146,14 @@ check("dotted path walks into a list of dicts", field_text(forum, "回复.回复
 check("'+' concatenates fields in order", field_text(forum, "主题+回复.回复") == "今天吃什么\n火锅\n随便")
 check("missing field yields no document", field_text(forum, "没有这个字段") is None)
 
+# the wiki bin's baidu-baike source: section dicts flatten to title + body, and the metadata columns the
+# `-` whole-record form used to drag in (`tags`, `url`) stay out
+baike = {"title": "红色食品", "summary": "指红色的食品。",
+         "sections": [{"title": "简介", "content": "富含番茄红素。"}],
+         "tags": ["饮食"], "url": "http://baike.baidu.com/view/0010.htm"}
+check("baidu-baike reads title+summary+sections without tags/url",
+      field_text(baike, "title+summary+sections") == "红色食品\n指红色的食品。\n简介\n富含番茄红素。")
+
 # ---- source specs: record shapes (hvlm/data_core.normalize_messages) --------------------------
 check("LCCC 'dialog' maps onto alternating user/self turns",
       [t["role"] for t in normalize_messages({"dialog": ["在吗", "在的", "忙啥"]})] == ["user", "self", "user"])

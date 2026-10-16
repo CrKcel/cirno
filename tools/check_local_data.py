@@ -1,9 +1,10 @@
 #!/usr/bin/env python
 """Torch-free checks of the offline data path: the snapshot converters and what run_pipeline.sh points at.
 
-Covers `scripts/prepare_local_data.py`'s text cleaners (the part of the pipeline with no other test), the
-per-job snapshot inputs, and the recipe's wiring - every `$SNAP/...` source has to resolve on disk and no
-`hf:` spec may survive in `run_pipeline.sh`, which is what keeps a training run off the network.
+Covers `scripts/prepare_local_data.py`'s text cleaners and `scripts/clean_ass.py`'s subtitle line
+filters (the part of the pipeline with no other test), the per-job snapshot inputs, and the recipe's
+wiring - every `$SNAP/...` source has to resolve on disk and no `hf:` spec may survive in
+`run_pipeline.sh`, which is what keeps a training run off the network.
 
 `--lengths` instead samples every source named in the recipe and prints its mean document length, which
 is what the tokenizer's per-source `@N` budgets are derived from.
@@ -17,10 +18,12 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from common_io import iter_texts, split_limit  # noqa: E402
-from prepare_local_data import (JOBS, DEFAULT_SNAPSHOT, chunk_texts, clean_bcorpus_line,  # noqa: E402
-                               clean_cornell, clean_daily_dialog, clean_empathetic, clean_topical,
-                               han_ratio, interactive_chapter_text, is_noise_line, split_chapters,
-                               strip_markup, strip_speaker, strip_wikitext)
+from clean_ass import chunk_lines as ass_chunks, clean_lines, drop_short_runs, is_drawing, is_furniture  # noqa: E402
+from prepare_local_data import (JOBS, DEFAULT_SNAPSHOT, chunk_texts,  # noqa: E402
+                                clean_bcorpus_line, clean_cornell, clean_daily_dialog, clean_empathetic,
+                                clean_line, clean_topical, han_ratio, interactive_chapter_text,
+                                is_noise_line, junk_ratio, split_chapters, strip_markup, strip_speaker,
+                                strip_wikitext)
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 ok = True
@@ -123,6 +126,13 @@ check("Topical-Chat markers become turn breaks",
       clean_topical("<s>[agent_1]Hello.</s><s>[agent_2]Hi!</s>") == "Hello.\nHi!")
 check("Cornell loses its character prefix and CRLF",
       clean_cornell("BIANCA   They do not!\r\n") == "They do not!")
+check("Cornell loses its emphasis tags and escaped quotes",
+      clean_cornell('BIANCA   They <u>do</u> &quot;not&quot;!\r\n') == 'They do "not"!')
+check("a chat line loses its Narrator prefix and wikilinks",
+      clean_line("Narrator：[[Apartment 4B]] is where we live") == "Apartment 4B is where we live")
+check("kajiwoto placeholders and memory directives go",
+      clean_line("#mem:name=felix I'll remember that.") == "I'll remember that."
+      and clean_line("*hugs you* {{name}}") == "*hugs you*")
 
 # ---- engine markup, scraped novels, persona cards -------------------------------------------------
 check("presentation tags go but their text stays",
@@ -145,6 +155,7 @@ check("entities are decoded", strip_markup("a &quot;q&quot; &amp; b&nbsp;c") == 
 check("site furniture, ads and fan notices are dropped, prose is not",
       is_noise_line("群230692396整理于1月26日") and is_noise_line("http://x.example/a.png")
       and is_noise_line("投票    收藏到书柜 (3481)") and is_noise_line("⚠️一切勿上升真人和现实生活")
+      and is_noise_line("都是假的，勿上升正主")
       and not is_noise_line("他挣扎着爬起身来，随手从身后抄起一把拖把。"))
 
 book = "第1章 星盗窝\n正文一\n第2章 昏迷\n正文二\n\u3000\u3000番外一小秋的性知识学习\n正文三"
@@ -163,6 +174,41 @@ check("an interactive-novel chapter keeps its title and body, drops the `img` UR
 
 check("a persona card loses its wikitext",
       strip_wikitext("成功<s>推倒</s>了{{黑幕|[[SLB]]}}。<ref>第5集</ref>随后") == "成功推倒了。随后")
+check("a script or style body goes with its tag",
+      strip_wikitext("正文\n<script>document.write('x')</script>\n结尾")
+      == "正文\n结尾")
+check("entities are decoded and replacement characters dropped",
+      strip_wikitext("158&nbsp;cm\ufffd\n紧跟\u3000在下") == "158 cm\n紧跟\u3000在下")
+check("a broken or section wikilink keeps its label",
+      strip_wikitext("[[幼儿体型||仍为小孩子]]和[[红警#3||红警3]]") == "仍为小孩子和红警3")
+check("a mojibake page is recognised",
+      junk_ratio("正常" * 50) < 0.02 < junk_ratio("常" + "\ufffd\ue636" * 40))
+
+# ---- ASS subtitles -------------------------------------------------------------------------------
+ass = (
+    "[Script Info]\r\nTitle: x\r\n"
+    "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\pos(1,2)}第一句\\N第二句\r\n"
+    "Dialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,第一句\\N第二句\r\n"
+    "Dialogue: 0,0:00:05.00,0:00:06.00,Default,,0,0,0,,{\\p1}m 0 0 l 24 -1 b 34 -2 54 -1 79 0\r\n"
+    "Dialogue: 0,0:00:07.00,0:00:08.00,Default,,0,0,0,,————\r\n"
+    "Comment: 0,0:00:09.00,0:00:10.00,Default,,0,0,0,,注释不是台词\r\n")
+check("only Dialogue lines survive, markup and repeats go, \\N breaks the line",
+      clean_lines(ass) == ["第一句", "第二句"])
+check("a drawing path is recognised, prose with numbers is not",
+      is_drawing("m 6.875 8.359 b 6.875 8.359 4.921 8.25 l 13.046 3.25")
+      and is_drawing("450 1005 1470 1072 1470 1005")
+      and not is_drawing("他说 3 个人在场")
+      and not is_drawing("第一句"))
+check("a separator is furniture, a lone exclamation is dialogue",
+      is_furniture("==== ====OP JP==== ====") and is_furniture("————————")
+      and not is_furniture("！") and not is_furniture("……"))
+check("a karaoke run of single characters is dropped whole",
+      drop_short_runs(["你", "的", "世", "界"], 4) == []
+      and drop_short_runs(["你", "的", "世", "界"], 5) == ["你", "的", "世", "界"]
+      and drop_short_runs(["古城！", "长篇台词一二三四五六七八"], 2)
+      == ["古城！", "长篇台词一二三四五六七八"])
+check("subtitle documents are cut at line boundaries near the target",
+      [len(d) for d in ass_chunks(["x" * 40] * 10, 100)] == [81] * 5)
 
 # ---- snapshot inputs -----------------------------------------------------------------------------
 snap = os.environ.get("CIRNO_SNAPSHOT", DEFAULT_SNAPSHOT)

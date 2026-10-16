@@ -7,7 +7,7 @@ writes the sources whose cleaning happens at the text level and which therefore 
 a field expression:
 
     b-corpus       `.txt.gz` works, decompressed, engine markup/watermarks dropped, split into documents
-    moegirl        raw wikitext: templates, tables, comments and markup stripped
+    moegirl        raw wikitext: templates, tables, comments, scripts and markup stripped
     scraped novels ChineseNovels (whole book -> chapters) and Chinese_interactive_novels_3k (`img` rows)
     JSON arrays    LooksJuicy / catgirl answer sets, plus the catgirl chain-of-thought removal
     English sets   DailyDialog / EmpatheticDialogues / Topical-Chat / Cornell / ESConv noise
@@ -93,7 +93,7 @@ _QUOTE_START = "「『“‘\"（(【["
 
 
 _SPEAKER = re.compile(r"^([^\s：:]{1,10})[：:]\s*(.*)$", re.S)
-_SPEAKER_NAMES = {"user", "gpt", "system", "assistant", "旁白", "旁白君", "系统", "画外音"}
+_SPEAKER_NAMES = {"user", "gpt", "system", "assistant", "narrator", "旁白", "旁白君", "系统", "画外音"}
 
 
 def strip_speaker(line):
@@ -101,7 +101,8 @@ def strip_speaker(line):
 
     b-corpus and ChatHaruhi tag every turn (`秦绢：「…」`, `gpt：…`), which would otherwise be trained as
     text.  A prefix is only removed when the rest starts with a quote/parenthesis or when the name is a
-    known marker, so a narration line such as `相信我：这就是…` keeps its clause."""
+    known marker, so a narration line such as `相信我：这就是…` keeps its clause.  `Narrator：` has no
+    quote after the colon, so the name has to be in the marker set to be recognised."""
     m = _SPEAKER.match(line)
     if not m:
         return line
@@ -111,8 +112,15 @@ def strip_speaker(line):
     return line
 
 
+# Platform directives in the kajiwoto chat log: `#mem:name=felix I'll remember that.` is the model's
+# memory write, not dialogue.  The rest of the line is kept.
+_MEM = re.compile(r"#mem:\S*")
+
+
 def clean_line(line):
-    return strip_speaker(line.replace("\ufeff", "").strip()).rstrip("\\").strip()
+    """One chat-log line: `#mem:` directives, wikitext/placeholders, speaker tag."""
+    line = strip_wikitext(_MEM.sub("", line.replace("\ufeff", "").strip()))
+    return strip_speaker(line).rstrip("\\").strip()
 
 
 def chunk_texts(texts, target=CHUNK_CHARS):
@@ -209,8 +217,9 @@ _AD_LINE = re.compile(
     r"https?://|www\.[a-z0-9-]+\.|(?:qq|微信|weixin)\s*群|群\s*[:：]?\s*\d{5,}|"
     r"最新章节|请记住本站|手机版|全文阅读|加入书签|更多小说|资源尽在|整理于|【作家想说的话", re.I)
 # Fan-work notices the platform asks the author to paste at the top of a chapter.  These phrases do not
-# occur in narrative prose, so unlike the furniture above they need no length guard.
-_NOTICE = re.compile(r"勿上升真人|请勿上升|禁止抄袭|禁止转载|未经允许|侵权必究|纯属虚构|如有雷同|"
+# occur in narrative prose, so unlike the furniture above they need no length guard.  `勿上升` covers the
+# variants the scrapers leave behind (`勿上升真人` / `勿上升正主` / `请勿上升` / `勿上升`).
+_NOTICE = re.compile(r"勿上升|禁止抄袭|禁止转载|未经允许|侵权必究|纯属虚构|如有雷同|"
                      r"求收藏|求推荐票|求月票|排雷|避雷|可删|勿喷")
 _FURNITURE = re.compile(r"投票|收藏到书柜|作品编号|连载中|^\s*原创\s*/")
 
@@ -233,10 +242,18 @@ def clean_bcorpus_line(line, player="你"):
 
 # ---- wikitext ------------------------------------------------------------------------------------
 _COMMENT = re.compile(r"<!--.*?-->", re.S)
+# MediaWiki keeps `<script>`/`<style>` bodies verbatim; stripping only the tag leaves their JavaScript in
+# the article text (measured 9 pages of the moegirl dump).
+_SCRIPT = re.compile(r"<(script|style)\b[^>]*>.*?</\1\s*>", re.S | re.I)
 _REF = re.compile(r"<ref[^>]*?/>|<ref[^>]*?>.*?</ref>|<references\s*/>", re.S | re.I)
 # `[[File:…]]` / `[[Category:…]]` are media and taxonomy, not prose; the doc keeps the body text only.
-_MEDIA = re.compile(r"\[\[(?:File|Image|文件|图像|图片|Category|分类)\s*:[^\[\]]*(?:\|.*?)?\]\]", re.S | re.I)
-_LINK = re.compile(r"\[\[[^\[\]|]*\|([^\[\]|]*)\]\]|\[\[([^\[\]|]*)\]\]")
+# A closing bracket may be missing (the scrapers truncate some of these), hence `\]\]?`.
+_MEDIA = re.compile(r"\[\[(?:File|Image|文件|图像|图片|Category|分类)\s*:[^\[\]]*\]\]?", re.S | re.I)
+# Any remaining `[[…]]`; the visible text is the part after the last `|`, so a broken `[[幼儿体型||…]]`
+# or a section link `[[红色警戒#…||红色警戒3]]` keeps its label instead of surviving as markup.
+_LINK = re.compile(r"\[\[[^\[\]]*\]\]?")
+# Bracket pairs an earlier rule already half-consumed (`{{…[[…}}` leaves `]]`).
+_BRACKETS = re.compile(r"\[\[|\]\]")
 _EXT_LINK = re.compile(r"\[(?:https?|ftp)://[^\s\]]+\s*([^\]]*)\]")
 _HEADING = re.compile(r"^=+\s*(.*?)\s*=+$", re.M)
 _MAGIC = re.compile(r"__[A-Z]+__")
@@ -245,6 +262,19 @@ _HTML = re.compile(r"</?[a-zA-Z][^>]*>")
 _EMPHASIS = re.compile(r"'{2,5}")
 _TABLE_ATTR = re.compile(r"^\s*[|!].*?\|", re.M)
 _BLANK = re.compile(r"\n{3,}")
+# A page the scraper stored as binary (an old GBK/Shift-JIS decode gone wrong) is mojibake, not text:
+# replacement characters, private-use code points and C0/C1 controls.  5 pages of the moegirl dump are
+# mostly this, and `strip_wikitext` cannot make prose of them, so the moegirl job drops such pages.
+_JUNK = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ufffd\ue000-\uf8ff]")
+
+
+def junk_ratio(text):
+    return len(_JUNK.findall(text)) / max(len(text), 1)
+
+
+def _link_label(match):
+    inner = match.group(0)[2:].rstrip("]")
+    return inner.rsplit("|", 1)[-1] if "|" in inner else inner
 
 
 def _strip_balanced(text, open_s, close_s):
@@ -268,18 +298,23 @@ def _strip_balanced(text, open_s, close_s):
 def strip_wikitext(text):
     """Reduce a raw wiki page to its readable prose (see doc/datasets.md 1.5)."""
     text = _COMMENT.sub("", text)
+    text = _SCRIPT.sub("", text)
     text = _REF.sub("", text)
     text = _strip_balanced(text, "{|", "|}")
     text = _strip_balanced(text, "{{", "}}")
     text = _MEDIA.sub("", text)
-    text = _LINK.sub(lambda m: m.group(1) or m.group(2) or "", text)
+    text = _LINK.sub(_link_label, text)
+    text = _BRACKETS.sub("", text)
     text = _EXT_LINK.sub(lambda m: m.group(1), text)
     text = _BREAK.sub("\n", text)
     text = _HEADING.sub(lambda m: m.group(1), text)
     text = _MAGIC.sub("", text)
+    for _ in range(2):  # scraped HTML is often escaped twice (`&amp;#9;`)
+        text = _ENTITY_RE.sub(_entity, text)
     text = _HTML.sub("", text)
     text = _TABLE_ATTR.sub("", text)
     text = _EMPHASIS.sub("", text)
+    text = _JUNK.sub("", text)
     text = _BLANK.sub("\n\n", text)
     return "\n".join(ln.strip() for ln in text.splitlines() if ln.strip())
 
@@ -304,11 +339,14 @@ def clean_topical(conversation):
 
 
 _CORNELL_SPEAKER = re.compile(r"^\s*[A-Z][A-Z0-9'.\- ]{0,30}?\s{2,}")
+# The script dump keeps the site's editorial emphasis (`<u>rough</u>`) and escaped quotes (`&quot;`).
+_DECOR_TAG = re.compile(r"</?\s*(?:u|i|b|s|em|strong|br)\s*/?>", re.I)
 
 
 def clean_cornell(text):
     """Cornell rows are one line each, prefixed with the character name (`BIANCA   They do not!`)."""
-    return _CORNELL_SPEAKER.sub("", (text or "").replace("\r", "")).strip()
+    text = _ENTITY_RE.sub(_entity, _DECOR_TAG.sub("", (text or "").replace("\r", "")))
+    return _CORNELL_SPEAKER.sub("", text).strip()
 
 
 # ------------------------------------------------------------------------------------------------
@@ -535,11 +573,16 @@ def moegirl(root, out):
     """Raw wikitext in, prose out: 99.6% of the pages carry `[[`, 91.5% `{{` (doc/datasets.md 1.5)."""
     files = sorted(glob.glob(os.path.join(root, "mrzjy--chinese_moegirl_wiki_corpus_raw",
                                           "default", "train", "*.parquet")))
+    skipped = 0
     with Sink(out) as sink:
         for path in files:
             for rec in _parquet_rows(path, ["text"]):
-                sink.write(strip_wikitext(rec.get("text") or ""))
-    return sink.docs, sink.chars, f"{len(files)} shards"
+                raw = rec.get("text") or ""
+                if junk_ratio(raw) > 0.02:      # a page the scraper stored as binary, not wikitext
+                    skipped += 1
+                    continue
+                sink.write(strip_wikitext(raw))
+    return sink.docs, sink.chars, f"{len(files)} shards, {skipped} mojibake pages dropped"
 
 
 @job("daily_dialog", "en_chat/daily_dialog.jsonl",

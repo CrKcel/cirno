@@ -16,7 +16,9 @@
 >    的 `.txt.gz`（解压、按 ~4000 字符切分、去 `角色名：`/`user：` 前缀与 `<USER>` 一类引擎标记、站点水印）、
 >    萌娘百科原始 wikitext、两个 JSON 数组角色扮演集（含猫娘思维链、人设卡上的 wikitext）、带标点/标记
 >    噪声的英文小集，以及两个抓来的网文集（`ChineseNovels` 拆章、`Chinese_interactive_novels_3k` 取正文并
->    丢掉 `img`/作者注）。其余源直接在快照上按字段表达式读，不改动快照。
+>    丢掉 `img`/作者注）。字幕集由 `scripts/clean_ass.py` 单独清洗；能写成字段表达式的清洗（百度百科的
+>    `title+summary+sections`）留在 `run_pipeline.sh` 的 `--source` 里，不落盘。其余源直接在快照上按
+>    字段表达式读，不改动快照。
 > 3. `silver/lccc` 的 `dialog` 字段是**空格分词**的（`你 去 那儿 竟然` 这种），所有吃它的步骤都要带
 >    `--desegment`（`train_tokenizer.py` / `prepare_data.py` / `train.py` 的 SFT 阶段都有这个开关）。
 > 4. **字符 → token**：中文按 0.70 token/字符、英文 0.25 估算（32k BPE，实测口径 1.18B token / 1.68B 字符
@@ -39,24 +41,24 @@
 八个桶的现状：
 
 - **`chat`** — 中文人类对话 / 口语
-  - 阶段权重 A / B / C：— / 20.8% / 34%
-  - 全程 token 1.010B；池子 1.010B；遍数 1.00
+  - 阶段权重 A / B / C：— / 17.6% / 41.4%
+  - 全程 token 936M；池子 780M；遍数 1.20
   - 来源：LCCC base+large、字幕、b-corpus `v-corpus-zh`
 - **`en_chat`** — 英文对话
-  - 阶段权重 A / B / C：— / 24.9% / 3.6%
+  - 阶段权重 A / B / C：— / 27.9% / 3.0%
   - 全程 token 810M；池子 810M；遍数 1.00
   - 来源：soda、真人小集、b-corpus `v-corpus-en`+`emoji`、`TinyStoriesV2`
 - **`fiction`** — 小说 / 网文 / 剧本对白
-  - 阶段权重 A / B / C：45% / 24.1% / 28%
+  - 阶段权重 A / B / C：45% / 25.7% / 27.0%
   - 全程 token 1.551B；池子 1.551B；遍数 1.00
   - 来源：webnovel-chinese、mrzjy 互动小说、b-corpus `近现代小说`/`翻译名著`/`轻小说`、ChineseNovels
 - **`long`** — 长文 / 非对话文本
-  - 阶段权重 A / B / C：35% / 1.9% / 4%
+  - 阶段权重 A / B / C：35% / 2.6% / 3.0%
   - 全程 token 527M；池子 527M；遍数 1.00
   - 来源：Zhihu-KOL、b-corpus `提高逼格`/`畅销书`/`散文集`/`古籍`
 - **`wiki`** — 通识 / 百科 / 常识
-  - 阶段权重 A / B / C：20% / 28.3% / 28.4%
-  - 全程 token 1.425B；池子 1.425B；遍数 1.00
+  - 阶段权重 A / B / C：20% / 26.2% / 23.5%
+  - 全程 token 1.2255B；池子 1.425B；遍数 0.86
   - 来源：baidu-baike、萌娘百科
 - **`roleplay`** — 人设卡 / 单轮扮演
   - 阶段权重 A / B / C：— / — / 1.6%
@@ -71,7 +73,7 @@
   - 全程 token 0.15M；池子 0.15M；遍数 1.00
   - 来源：kxdw2580 v2
 
-合计预算 = 5.35B
+合计预算 = 5.07B（= 各桶 allocate 之和）
 
 ### 1.1 chat — 中文人类对话 / 口语
 
@@ -82,17 +84,17 @@
     需 `--desegment`**。⚠️ base 是 large 的清洗子集，实测重叠约 **30%**，同时用两个来源会让 ~7% 的
     chat token 是重复对话；要在意就去重或只用 large
 - **[chenrm/anime-subtitles](https://hf.co/datasets/chenrm/anime-subtitles)** — 人类对话；67k 部字幕 /
-  1.3 GB parquet，清洗后有效 **428M token**
-  - 取法：`jsonl:/mnt/data/LLM/hf/chenrm--anime-subtitles/dialogue.jsonl:text`（快照里已有
+  1.3 GB parquet，清洗后 96,707 篇场景切片 / 0.282B 字符 ≈ **0.20B token**
+  - 取法：`jsonl:/mnt/data/LLM/hf/chenrm--anime-subtitles/dialogue.jsonl:text`（快照里是
     `scripts/clean_ass.py --zh-only --t2s` 的产物，见 [progress.md](progress.md)）
   - 动画字幕，短句口语多。⚠️ `data` 字段是**整份 `.ass` 文件**：含 `[Script Info]` 头、样式定义与时间轴，
-    必须先清洗。全量 11.43B 原始字符只剩 2.93B 对白，而 `prepare_data` 的 `--max_doc_chars 200000` 之后
-    **真正能进桶的只有 0.61B 字符 ≈ 0.43B token**：1,470 篇超过 200k 字符（最大 67 MB），里面是卡拉OK
-    逐字行（`佐\n佐\n佐…`），这批文档是待清理的噪声
+    排版集还用 `{\p1}` 画矢量图（坐标串由 `m`/`l`/`b` 命令连接，是原始字符里最大的一块）。清洗只取
+    `Dialogue:` 行，丢掉绘制路径、卡拉OK 的重复事件、竖排歌词的单字行，并按 ~4000 字符切成场景文档；
+    不清洗的话 11.43B 原始字符里只有 2.5% 是台词，整集一篇文档还会被 `--max_doc_chars 200000` 截断
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `v-corpus-zh/**`** — 人类对话【流行文化】；
   820 个 `.txt.gz` / 187.6 MB 压缩，抽样 0.96 字符/压缩字节 → ≈180M 字符 ≈ **130M token 量级**
   - 取法：`prepare_local_data.py` 的产物 `jsonl:data/chat/bcorpus_zh.jsonl:text`（820 个 `.txt.gz`
-    解压后按 ~4000 字符一篇落盘；180.2M 字符 ≈ 126M token）
+    解压后按 ~4000 字符一篇落盘；180.1M 字符 ≈ 126M token）
   - 视觉小说台词，按 `厂商/作品/线路` 组织，行是 `角色名：「台词」` 或纯旁白，中文行
     中位 21 字。仓库里混着 130 多个 `.py`/`.bat` 提取脚本，glob 要写成 `*.txt.gz`；`txt:` 一个文件一篇文档，必须先拆行
   - 清洗同时去掉引擎标记：`<usr>`/`<USER>` 是主角名（行首的当作说话人前缀丢掉，行内的换成 `你`/`you`）、
@@ -100,7 +102,8 @@
     标签（`<F16「…」>`）整段保留，避免连同正文一起删掉
 
 同仓的 `v-corpus-en`（135 个 `.txt.gz` / 69.3 MB）是英文视觉小说对白，归 §1.2。该桶的池子 = LCCC
-base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再要扩只能从修好卡拉OK问题后的字幕余量上想办法。
+base+large 453M + 字幕 ≈200M + `v-corpus-zh` ≈130M ≈ **0.78B**；字幕清洗后不再有可回收的余量，要扩只能从
+播客/群聊转写这类口语语料上想办法。
 
 ### 1.2 en_chat — 英文对话
 
@@ -129,11 +132,11 @@ base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再�
   - Topical-Chat 的镜像（官方 `Conversational-Reasoning/Topical-Chat` 已加载失败、无 parquet 分支）。
     两人无预设角色、知识带聊，接近真实网聊。⚠️ 文本带 `<s>[agent_1]…</s><s>[agent_2]…</s>` 标记，要剥掉
 - **[mylesmharrison/cornell-movie-dialog](https://hf.co/datasets/mylesmharrison/cornell-movie-dialog)** —剧本；305k 行
-  - 取法：`jsonl:data/en_chat/cornell.jsonl:text`（落盘时去掉角色名前缀与 `\r\n`，并把相邻台词按
-    ~4000 字符组回一段）
+  - 取法：`jsonl:data/en_chat/cornell.jsonl:text`（落盘时去掉角色名前缀、`\r\n`、`<u>` 一类强调标签，
+    还原 `&quot;`，并把相邻台词按 ~4000 字符组回一段）
   - 影视对白，口语味足、情绪起伏大。⚠️ **每行一句**不是整段会话，且带角色名前缀（`BIANCA   They do
-    not!`）与 `\r\n`，要按角色切分并去掉前缀。官方 `cornell-movie-dialog/cornell_movie_dialog` 无 parquet
-    分支，已不可用
+    not!`）、`\r\n`、转义引号与 `<u>` 标记（实测 12.9% 的行带其中之一），要按角色切分并去掉。官方
+    `cornell-movie-dialog/cornell_movie_dialog` 无 parquet 分支，已不可用
 - **[thu-coai/esconv](https://hf.co/datasets/thu-coai/esconv)** —1.3k 段对话
   - 情感支持对话；量很小。⚠️ `text` 字段实测是**一整条 JSON 字符串**（含 `experience_type` 等键），要么
     改嵌套字段路径，要么先清洗
@@ -143,10 +146,11 @@ base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再�
   - 英文视觉小说台词，格式与中文侧一致（`角色名：「台词」`），是该桶最大的一份人类写作文本（+≈50M，
     该桶池子与顺序见本节末）。清洗与中文侧共用一套规则，行内的 `<USER>` 换成 `you`
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `emoji/kajiwoto.txt.gz`** — ⚠️ 合成；
-  6.70M 字符 / 147k 行（Han 0.00）≈ **1.7M token**
+  5.9M 字符 / 147k 行（Han 0.00）≈ **1.5M token**
   - 目录名叫 emoji，内容是 **`user：`/`gpt：` 的英文对话日志**（kajiwoto 是 AI 角色平台），`gpt：` 一侧
-    是模型生成，角色扮演味重。⚠️ 整份 6.7M 字符会被 `txt:` 当成一篇并因 `--max_doc_chars` 整篇丢掉，
-    必须按行拆；`user：`/`gpt：` 前缀要在清洗时去掉
+    是模型生成，角色扮演味重。⚠️ 整份会被 `txt:` 当成一篇并因 `--max_doc_chars` 整篇丢掉，必须按行拆；
+    `user：`/`gpt：` 前缀、`{{name}}` 一类平台占位符和 `#mem:name=…` 记忆指令（实测 7.5% / 1.7% 的行）
+    都要去掉
 
 除 SODA 外，英文桶里**真人写的小集带格式噪声**（标点前空格、`_comma_`、`<s>[agent_1]` 标记、角色名
 前缀、整条 JSON 字符串），进桶前都要过一遍。
@@ -218,19 +222,20 @@ base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再�
 
 - **[lars1234/baidu-baike-dataset](https://hf.co/datasets/lars1234/baidu-baike-dataset)** — 通识；
   parquet 分支 1.7M 条 / 3.2 GB（原 json 5.63M 条 / 16.8 GB）
-  - 取法：`parquet:/mnt/data/LLM/hf/lars1234--baidu-baike-dataset/default/partial-train/*.parquet:-`
+  - 取法：`parquet:/mnt/data/LLM/hf/lars1234--baidu-baike-dataset/default/partial-train/*.parquet:title+summary+sections`
   - 该桶主力。**简体、现代白话**的百科条目，实测信息密度很高：**中位条目仅 130 字**（`title+summary`
-    中位 78 字），比论述型长条目更贴近"一句话说清一个事实"的形态；parquet 分支实测 1.73M 条 /
-    1.92B 字符 ≈ **1.34B token**，按池子全量读一遍（它按"常见词 → 冷门实体"排序，尾部是冷门实体）。
-    字段 `title`/`summary`/`sections`/`tags`/`url`，`-` 取整条（自动拼 sections），要高事实密度用
-    `title+summary`。快照里就是 parquet 分支（3.2 GB），
-    不必碰上层那个 16.8 GB 的原始单文件 json
+    中位 78 字），比论述型长条目更贴近"一句话说清一个事实"的形态；parquet 分支实测 1.73M 条、正文合计
+    1.83B 字符 ≈ **1.28B token**，按池子全量读一遍（它按"常见词 → 冷门实体"排序，尾部是冷门实体）。
+    ⚠️ 字段是 `title`/`summary`/`sections`/`tags`/`url`，**不要用 `-` 取整条**：它会把 `tags` 与 `url`
+    一起拼进正文，实测每篇尾部都是该条目的 `http://baike.baidu.com/view/….htm`。快照里就是 parquet 分支
+    （3.2 GB），不必碰上层那个 16.8 GB 的原始单文件 json
 - **[mrzjy/chinese_moegirl_wiki_corpus_raw](https://hf.co/datasets/mrzjy/chinese_moegirl_wiki_corpus_raw)** —
   通识【流行文化】；131.5k 条 / 2 个 parquet 分片共 301 MB，合计 ≈291M 字符 ≈ **2 亿 token 量级
   （清洗前）**
   - 取法：`jsonl:data/wiki/moegirl.jsonl:text`（`prepare_local_data.py` 从快照 parquet 的 `text` 字段
-    剥掉模板/表格/注释/媒体链接后落盘；实测清洗后 72.1M 字符、中位 198 字符/条 ≈ 50M token，需按
-    `train_tokens` 复核）
+    剥掉模板/表格/注释/`<script>` 正文/媒体链接、还原 `&nbsp;` 一类实体后落盘；实测清洗后 131,528 条 /
+    72.1M 字符、中位 198 字符/条 ≈ 50M token，需按 `train_tokens` 复核。5 页是抓取时就存坏的二进制，
+    `junk_ratio` 超阈值直接丢掉）
   - 萌娘百科 20230814 dump，给"网感"补事实性内容；⚠️ 是**原始
     wikitext**
 
@@ -268,14 +273,15 @@ base+large 453M + 字幕有效 428M + `v-corpus-zh` ≈130M ≈ **1.01B**；再�
     （`question_source=synthesized`），回复是古白话/武侠腔并带 `「」`。字段名不在 `normalize_messages` 的
     别名表里，**只进预训练文本桶**，SFT 需先转成 `messages`
 - **[Limour/b-corpus](https://hf.co/datasets/Limour/b-corpus) `ChatHaruhi/**`** — 角色扮演【流行文化】；
-  38 个 `.txt.gz` / 2.46 MB，实测 4.00M 字符（Han 0.26）≈ **1.6M token**（中文侧 27 个文件 ~1.0M +
-  英文侧 11 个 ~0.6M）
+  38 个 `.txt.gz` / 2.46 MB，清洗后 3.59M 字符 ≈ **1.4M token**（中文侧 27 个文件 1.16M 字符 ≈0.8M +
+  英文侧 11 个 2.43M 字符 ≈0.6M）
   - 取法：`prepare_local_data.py` 的产物 `jsonl:data/roleplay_char/chat_haruhi_zh.jsonl:text` 与
-    `chat_haruhi_en.jsonl`（按 Han 比例分语言，去掉首行 system 与行尾残留的 `\`）
+    `chat_haruhi_en.jsonl`（按 Han 比例分语言，去掉首行 system、行尾残留的 `\`、`[[…]]` 链接、
+    `<span style=…>` 样式，以及漏掉的 `Narrator：` 前缀——英文侧 40.4% 的文档带它）
   - 按角色切好的语料（`ChatHaruhi/RolePlaying/令狐冲.txt.gz`、`ChatHaruhi/Waifu/艾希.txt.gz`），首行是
     `system：I want you to act like …`，其后每行 `角色：「台词」` 或 `旁白：…`。⚠️ 与
     `silk-road/ChatHaruhi-54K` 同源；同一目录里英文侧（Harry Potter、Sheldon）与中文侧（金庸、原神）混放，
-    要按 Han 比例分语言后再进桶；首行 system 与行尾残留的 `\` 要在清洗时去掉
+    要按 Han 比例分语言后再进桶
 
 ### 1.8 roleplay_catgirl — 猫娘人设
 

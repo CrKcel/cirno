@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "budget_tokens": 5348000000,
+  "budget_tokens": 5072000000,
   "schedule": {
     "type": "wsd",
     "peak_lr": 0.001,
@@ -12,7 +12,7 @@
     "clip": 1.0
   },
   "bins": {
-    "chat":             {"dir": "data/bin/chat",             "expected_tokens": 1010000000, "allocate": 1212000000, "val_tokens": 4000000},
+    "chat":             {"dir": "data/bin/chat",             "expected_tokens": 780000000,  "allocate": 936000000,  "val_tokens": 4000000},
     "en_chat":          {"dir": "data/bin/en_chat",          "expected_tokens": 810000000,  "allocate": 810000000,  "val_tokens": 1000000},
     "fiction":          {"dir": "data/bin/fiction",          "expected_tokens": 1551000000, "allocate": 1551000000, "val_tokens": 2500000},
     "long":             {"dir": "data/bin/long",             "expected_tokens": 527000000,  "allocate": 527000000,  "val_tokens": 2000000},

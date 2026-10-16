@@ -94,7 +94,7 @@ SFT 阶段建议 `--early_stop_patience 4 --eval_every 100`。
 `--plan` 运行时，`metrics.jsonl` 里的 `budget_tokens`、`total_steps` 与 `lr` 都来自
 `runs/<stage>/plan.resolved.json`（`configs/pretrain_plan.json` 经 `tools/plan_mix.py` 解析）。三段预训练
 是三次独立 run，但学习率是一条**以 token 为轴的全局 WSD 曲线**（`lr_at_tokens`）：warmup 2%、中段恒定、
-最后 20% 衰减，衰减起点正好落在退火段的开始（0.8 × 5.35B = 4.28B）。所以监控看到的是连续的进度，而不是
+最后 20% 衰减，衰减起点正好落在退火段的开始（0.8 × 5.07B = 4.06B）。所以监控看到的是连续的进度，而不是
 三次互不相干的 run。
 
 ## 6. 常见读数
