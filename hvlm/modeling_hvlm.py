@@ -9,6 +9,9 @@ Conventions
 * The residual stream stays in fp32 under bf16 autocast; matmuls run in bf16.
 * The LM head is tied to the embedding (no separate `lm_head` module); logits are only materialised when
   `labels is None`.  With labels the loss is computed in chunks (see `chunked_cross_entropy`).
+* Generation cache: pass `cache=model.new_cache()` to `forward`.  The first (prefill) call of any length
+  fills it; after that only single-token calls are accepted (images may only appear in the prefill -
+  image slots are filled by the vision tower, which decode steps do not run).
 """
 import math
 from dataclasses import dataclass
@@ -128,7 +131,9 @@ class GatedAttention(nn.Module):
         self.q_norm = RMSNorm(self.hd, config.rms_norm_eps)
         self.k_norm = RMSNorm(self.hd, config.rms_norm_eps)
 
-    def forward(self, x, cos, sin):
+    def forward(self, x, cos, sin, past_kv=None):
+        """past_kv: (k, v) [B, nkv, T_past, hd] carried from a previous call (decode).  Returns
+        (out, present_kv); present is the full k/v (post-RoPE, pre-GQA-repeat) for the next step."""
         B, T, _ = x.shape
         q, gate = self.q_proj(x).view(B, T, self.nh, 2 * self.hd).chunk(2, dim=-1)
         k = self.k_proj(x).view(B, T, self.nkv, self.hd)
@@ -136,14 +141,18 @@ class GatedAttention(nn.Module):
         q = apply_rope(self.q_norm(q), cos, sin).transpose(1, 2)  # [B, nh, T, hd]
         k = apply_rope(self.k_norm(k), cos, sin).transpose(1, 2)  # [B, nkv, T, hd]
         v = v.transpose(1, 2)
+        if past_kv is not None:  # is_causal is top-left aligned and would misalign a q=1, kv>1 step
+            k = torch.cat([past_kv[0], k], dim=2)
+            v = torch.cat([past_kv[1], v], dim=2)
+        present = (k, v)
         rep = self.nh // self.nkv
         if rep > 1:
             k = k.repeat_interleave(rep, dim=1)
             v = v.repeat_interleave(rep, dim=1)
-        o = F.scaled_dot_product_attention(q, k, v, is_causal=True)  # [B, nh, T, hd]
+        o = F.scaled_dot_product_attention(q, k, v, is_causal=past_kv is None)  # [B, nh, T, hd]
         o = o.transpose(1, 2).reshape(B, T, self.nh * self.hd)
         o = o * torch.sigmoid(gate.reshape(B, T, self.nh * self.hd))
-        return self.o_proj(o)
+        return self.o_proj(o), present
 
 
 class GatedDeltaNet(nn.Module):
@@ -170,13 +179,26 @@ class GatedDeltaNet(nn.Module):
         self.out_proj = nn.Linear(self.val_dim, d, bias=False)
         self.out_proj._residual_out = True
 
-    def forward(self, x, cos=None, sin=None):  # cos/sin unused: this layer needs no positional encoding
+    def forward(self, x, cos=None, sin=None, past=None):  # cos/sin unused: this layer needs no positional encoding
+        """past: (conv_state [B, conv_dim, kernel-1], delta state [B, Hv, Dk, Dv]) carried from a
+        previous call.  Returns (out, present); the delta state is fp32, the conv window keeps x's dtype."""
         B, T, _ = x.shape
         q, k, v, z = torch.split(self.in_proj_qkvz(x), [self.key_dim, self.key_dim, self.val_dim, self.val_dim], dim=-1)
         b, a = self.in_proj_ba(x).chunk(2, dim=-1)  # [B, T, Hv] each
 
-        mixed = torch.cat([q, k, v], dim=-1).transpose(1, 2)  # [B, C, T]
-        mixed = F.silu(self.conv1d(mixed)[..., :T]).transpose(1, 2)  # causal depthwise conv, [B, T, C]
+        mixed_in = torch.cat([q, k, v], dim=-1).transpose(1, 2)  # [B, C, T]
+        if past is not None:  # single-token step: conv over the cached window, then the recurrence itself
+            conv_state, S = past
+            window = torch.cat([conv_state, mixed_in], dim=2)  # [B, C, kernel-1+T]
+            mixed = F.silu(F.conv1d(window, self.conv1d.weight, groups=self.conv_dim))
+            conv_state = window[:, :, -(self.kernel - 1):].clone()
+        else:
+            mixed = F.silu(self.conv1d(mixed_in)[..., :T])  # causal depthwise conv
+            if T >= self.kernel - 1:
+                conv_state = mixed_in[:, :, -(self.kernel - 1):].clone()
+            else:  # shorter than the conv window: zero left-pad, matching the conv's own padding
+                conv_state = F.pad(mixed_in, (self.kernel - 1 - T, 0))
+        mixed = mixed.transpose(1, 2)  # [B, T, C]
         q, k, v = torch.split(mixed, [self.key_dim, self.key_dim, self.val_dim], dim=-1)
         q = q.reshape(B, T, self.Hk, self.Dk)
         k = k.reshape(B, T, self.Hk, self.Dk)
@@ -188,9 +210,12 @@ class GatedDeltaNet(nn.Module):
 
         beta = torch.sigmoid(b.float())  # write strength in (0, 1)
         g = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias.float())  # log-decay <= 0
-        o, _ = gated_delta_rule(q, k, v, g, beta, impl=self.impl, chunk_size=self.chunk_size)  # fp32 [B,T,Hv,Dv]
+        if past is not None:  # one token: the recurrence is the definition and cheaper than any kernel
+            o, S = gated_delta_rule(q, k, v, g, beta, impl="recurrent", initial_state=S)
+        else:
+            o, S = gated_delta_rule(q, k, v, g, beta, impl=self.impl, chunk_size=self.chunk_size)  # fp32 [B,T,Hv,Dv]
         o = self.norm(o, z.reshape(B, T, self.Hv, self.Dv)).to(x.dtype)
-        return self.out_proj(o.reshape(B, T, self.val_dim))
+        return self.out_proj(o.reshape(B, T, self.val_dim)), (conv_state, S)
 
 
 class DecoderLayer(nn.Module):
@@ -207,12 +232,12 @@ class DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         self.mlp = MLP(config)
 
-    def forward(self, x, cos, sin):
+    def forward(self, x, cos, sin, past=None):
         h = self.input_layernorm(x)
         mixer = self.self_attn if self.layer_type == "full_attention" else self.linear_attn
-        x = x + mixer(h, cos, sin)
+        x, present = mixer(h, cos, sin, past)
         x = x + self.mlp(self.post_attention_layernorm(x))
-        return x
+        return x, present
 
 
 # --------------------------------------------------------------------------------------------------
@@ -234,7 +259,7 @@ class MTPModule(nn.Module):
     def forward(self, hidden, embeds, cos, sin):
         x = torch.cat([self.pre_fc_norm_hidden(hidden), self.pre_fc_norm_embed(embeds)], dim=-1)
         x = self.fc(x).to(hidden.dtype)
-        return self.norm(self.layer(x, cos, sin))
+        return self.norm(self.layer(x, cos, sin)[0])
 
 
 # --------------------------------------------------------------------------------------------------
@@ -331,6 +356,27 @@ class HVLMOutput(ModelOutput):
     logits: Optional[torch.Tensor] = None
 
 
+@dataclass
+class InferenceCache:
+    """Decode state for generation: appended (k, v) for the Gated Attention layers and
+    (conv window, delta-rule state) for the GDN layers.  Built by `model.new_cache()`; the prefill
+    call (any length, `labels=None`) fills it, every later single-token call updates it in place.
+    Images may only appear in the prefill."""
+
+    entries: list
+    seq_len: int = 0
+
+
+def _sample_token(logits, temperature, top_k):
+    if temperature <= 0:
+        return logits.argmax(-1, keepdim=True)
+    logits = logits.float() / temperature
+    if top_k:
+        kth = torch.topk(logits, min(top_k, logits.shape[-1])).values[:, -1:]
+        logits = logits.masked_fill(logits < kth, float("-inf"))
+    return torch.multinomial(F.softmax(logits, dim=-1), 1)
+
+
 # --------------------------------------------------------------------------------------------------
 # full model
 # --------------------------------------------------------------------------------------------------
@@ -391,6 +437,9 @@ class HVLMForConditionalGeneration(PreTrainedModel):
         elif isinstance(module, VisionTower):
             nn.init.normal_(module.pos_embed, mean=0.0, std=std)
 
+    def new_cache(self):
+        return InferenceCache([None] * len(self.layers))
+
     # --- forward -----------------------------------------------------------------------------
     def _embed(self, input_ids, pixel_values):
         embeds = self.embed_tokens(input_ids)
@@ -417,6 +466,7 @@ class HVLMForConditionalGeneration(PreTrainedModel):
         attention_mask: Optional[torch.Tensor] = None,  # ignored: right-padding + causal mixers need no mask
         compute_mtp: bool = True,
         logits_to_keep: int = 0,
+        cache: Optional[InferenceCache] = None,
     ) -> HVLMOutput:
         if inputs_embeds is None:
             if input_ids is None:
@@ -425,6 +475,12 @@ class HVLMForConditionalGeneration(PreTrainedModel):
         elif pixel_values is not None:
             raise ValueError("pixel_values requires input_ids (to locate the image slots)")
         B, T, d = inputs_embeds.shape
+        if cache is not None:
+            if labels is not None:
+                raise ValueError("cache is generation-only: pass labels=None")
+            if cache.seq_len > 0 and (T != 1 or pixel_values is not None):
+                raise ValueError("after the prefill call the cache accepts single text tokens only "
+                                 "(images must be part of the prefill)")
 
         if position_ids is None:
             position_ids = torch.arange(T, device=inputs_embeds.device)[None, None, :].expand(3, B, T)
@@ -433,8 +489,12 @@ class HVLMForConditionalGeneration(PreTrainedModel):
         cos, sin = self.rotary(position_ids)
 
         h = inputs_embeds
-        for layer in self.layers:
-            h = layer(h, cos, sin)
+        for i, layer in enumerate(self.layers):
+            h, present = layer(h, cos, sin, None if cache is None else cache.entries[i])
+            if cache is not None:
+                cache.entries[i] = present
+        if cache is not None:
+            cache.seq_len += T
         hn = self.norm(h)
         W = self.embed_tokens.weight
 
@@ -464,31 +524,46 @@ class HVLMForConditionalGeneration(PreTrainedModel):
                 loss = lm_loss + self.config.mtp_loss_weight * mtp_loss
         return HVLMOutput(loss=loss, lm_loss=lm_loss.detach(), mtp_loss=None if mtp_loss is None else mtp_loss.detach())
 
-    # --- simple sampling (no KV / state cache: recomputes the prefix every step; for smoke tests) -----
+    # --- sampling ---------------------------------------------------------------------------
     @torch.no_grad()
     def generate_simple(self, input_ids, pixel_values=None, max_new_tokens=64, temperature=0.8, top_k=40,
-                        eos_token_id=None):
+                        eos_token_id=None, use_cache=True):
+        """Batch-1 continuation.  With use_cache=True (default) the prompt is processed once and each new
+        token goes through the InferenceCache (single-token steps); use_cache=False recomputes the prefix
+        every step - the reference path the cached one is tested against."""
         assert input_ids.shape[0] == 1, "generate_simple supports batch size 1"
         vc = self.config.vision_config
         ids = input_ids
+        cache = self.new_cache() if use_cache else None
+
+        def positions(seq):
+            p = build_mrope_positions(seq[0].cpu().numpy(), self.config.image_token_id, vc.merged_grid_size)
+            return torch.from_numpy(p)[:, None, :].to(seq.device)
+
+        if pixel_values is not None:
+            p = build_mrope_positions(ids[0].cpu().numpy(), self.config.image_token_id, vc.merged_grid_size)
+            pos = torch.from_numpy(p)[:, None, :].to(ids.device)
+            # text after an image resumes at start + grid on every axis, so max+1 is right in both cases
+            next_pos = int(p[:, -1].max()) + 1
+        else:
+            pos, next_pos = None, ids.shape[1]
+        logits = self(input_ids=ids, pixel_values=pixel_values, position_ids=pos, cache=cache).logits[:, -1]
+
+        out = [ids]
         for _ in range(max_new_tokens):
-            pos = None
-            if pixel_values is not None:
-                p = build_mrope_positions(ids[0].cpu().numpy(), self.config.image_token_id, vc.merged_grid_size)
-                pos = torch.from_numpy(p)[:, None, :].to(ids.device)
-            logits = self(input_ids=ids, pixel_values=pixel_values, position_ids=pos, logits_to_keep=1).logits[:, -1]
-            if temperature <= 0:
-                nxt = logits.argmax(-1, keepdim=True)
-            else:
-                logits = logits.float() / temperature
-                if top_k:
-                    kth = torch.topk(logits, min(top_k, logits.shape[-1])).values[:, -1:]
-                    logits = logits.masked_fill(logits < kth, float("-inf"))
-                nxt = torch.multinomial(F.softmax(logits, dim=-1), 1)
-            ids = torch.cat([ids, nxt], dim=1)
+            nxt = _sample_token(logits, temperature, top_k)
+            out.append(nxt)
             if eos_token_id is not None and int(nxt) == eos_token_id:
                 break
-        return ids
+            if cache is not None:
+                pos1 = torch.full((3, 1, 1), next_pos, dtype=torch.long, device=ids.device)
+                next_pos += 1
+                logits = self(input_ids=nxt, position_ids=pos1, cache=cache).logits[:, -1]
+            else:
+                ids = torch.cat([ids, nxt], dim=1)
+                pos = positions(ids) if pixel_values is not None else None
+                logits = self(input_ids=ids, pixel_values=pixel_values, position_ids=pos).logits[:, -1]
+        return torch.cat(out, dim=1)
 
 
 HVLMForCausalLM = HVLMForConditionalGeneration

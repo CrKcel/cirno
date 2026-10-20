@@ -68,3 +68,11 @@ Cirno-130M 是一个约 130M 参数的混合视觉语言模型：20 层 decoder 
 每步 token 数交给 `--grad_accum` 凑**：显存与吞吐几乎只由 micro_batch × seq_len 决定，用
 `python tools/measure_batch.py --stage pretrain [--compile]` 可在本机重测，
 它最后会打印各 seq_len 下的安全 micro_batch。
+
+### 3.4 推理缓存
+
+`generate_simple` 走 `InferenceCache`（`model.new_cache()`）：prefill 一次过完整前缀，之后每步只喂单个
+token——GQA 层续写 K/V，GDN 层携带 (conv 窗口, 递推状态)，GDN 状态形状固定、不随长度增长。图片只能出现在
+prefill 里（图像槽位由视觉塔填充，解码步不跑视觉塔）；单步走 `recurrent` 路径（与 chunk 路径数值等价）。
+`use_cache=False` 保留逐步重算前缀的参照路径；测试验证缓存路径与全量前向逐 token 一致、两种生成方式
+产出相同 token。

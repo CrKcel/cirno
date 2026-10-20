@@ -91,10 +91,7 @@ python tools/blind_test.py --score runs/eval/sft    # 胜率写回 report.json /
 
 ## 5. 端侧成本
 
-`--bench` 报加载耗时、参数量、prompt token 数、prefill 毫秒、decode tok/s 与峰值显存。当前
-`generate_simple` 每步重算前缀（KV/状态缓存见 [progress.md](progress.md)），所以这里的 decode 吞吐是无缓存
-上界；真实端侧数字需要在目标设备上、且缓存落地后测，`cost.json` 的 `note` 也这么记录。版本之间横向对比时
-它是同口径的相对量。
+`--bench` 报加载耗时、参数量、prompt token 数、prefill 毫秒、decode tok/s 与峰值显存。
 
 ## 6. 校验
 

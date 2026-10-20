@@ -125,11 +125,14 @@ token budget); `--mm_weights` sets the align/SFT source mixture. Monitoring swit
 1. `tools/check_algorithms_numpy.py`, `tools/check_data_numpy.py`, `tools/check_local_data.py`,
    `tools/check_monitor.py`, `tools/check_eval.py`, `tools/estimate.py` — no torch needed; all pass in the
    sandbox.
-2. `tests/test_model.py` — 25 tests, ~19 s on the RTX 4060 Laptop (GPU paths included). Coverage:
+2. `tests/test_model.py` — 27 tests, ~19 s on the RTX 4060 Laptop (GPU paths included). Coverage:
    chunked delta rule ≡ recurrence (forward and gradients), parameter count matches the estimator,
    causality (including images), right padding is inert, MTP label alignment, chunked CE ≡ full CE
    (loss and gradients), bf16 autocast, align-stage trains only the ViT, save/load round-trip,
-   tiny-model overfit. Kernel and precision tests: `test_gdn_impl_dispatch` (`auto` must fall back to
+   tiny-model overfit. Inference-cache tests:
+   `test_inference_cache_matches_full_forward` (prefill + cached single-token steps ≡ one full
+   forward, image prompts included) and `test_cached_generation_matches_recompute` (cached
+   generation emits the same tokens as the cacheless recompute path). Kernel and precision tests: `test_gdn_impl_dispatch` (`auto` must fall back to
    torch on CPU or without fla), `test_fla_matches_torch_impl` (Triton kernels vs the fp32 reference,
    error bound). Evaluation tests:
    `test_eval_prompt_matches_training_encoding` (the generation prompt is the training-time prefix:

@@ -246,7 +246,7 @@ def test_mtp_label_alignment():
             cos, sin = m.rotary(pos)
             h = emb
             for layer in m.layers:
-                h = layer(h, cos, sin)
+                h, _ = layer(h, cos, sin)
             mod = m.mtp[0]
             prev = mod(h[:, :19], emb[:, 1:], cos[:, :19], sin[:, :19])
             logits = prev @ m.embed_tokens.weight.T
@@ -349,6 +349,43 @@ def test_generate_simple_runs():
     out = m.generate_simple(b["input_ids"][:, :4 + m.config.vision_config.num_image_tokens + 3],
                             pixel_values=b["pixel_values"], max_new_tokens=3, temperature=0)
     assert out.shape[1] == 4 + m.config.vision_config.num_image_tokens + 3 + 3
+
+
+def test_inference_cache_matches_full_forward():
+    """Prefill + cached single-token steps must reproduce one full forward over the same tokens: the
+    (k, v) / conv-window / delta state carried across calls is exactly the prefix context."""
+    m = tiny_model().eval()
+    b = rand_batch(m.config, B=1, with_image=True)
+    ids, pos = b["input_ids"], b["position_ids"]
+    T = ids.shape[1]
+    cut = 4 + m.config.vision_config.num_image_tokens + 1  # past the image block: the decode steps are text
+    with torch.no_grad():
+        full = m(input_ids=ids, pixel_values=b["pixel_values"], position_ids=pos).logits[:, cut - 1:]
+        cache = m.new_cache()
+        logits = [m(input_ids=ids[:, :cut], pixel_values=b["pixel_values"], position_ids=pos[:, :, :cut],
+                    cache=cache).logits[:, -1]]
+        for t in range(cut, T):
+            logits.append(m(input_ids=ids[:, t:t + 1], position_ids=pos[:, :, t:t + 1], cache=cache).logits[:, -1])
+        cached = torch.stack(logits, dim=1)
+    assert cache.seq_len == T and all(e is not None for e in cache.entries)
+    assert torch.allclose(cached, full, atol=1e-3), (cached - full).abs().max().item()
+
+
+def test_cached_generation_matches_recompute():
+    """generate_simple with the cache must emit the same tokens as the cacheless recompute path."""
+    m = tiny_model()
+    for with_image in (False, True):
+        b = rand_batch(m.config, B=1, with_image=with_image)
+        keep = (4 + m.config.vision_config.num_image_tokens + 3) if with_image else 12
+        ids = b["input_ids"][:, :keep]
+        pv = b["pixel_values"] if with_image else None
+        a = m.generate_simple(ids, pixel_values=pv, max_new_tokens=6, temperature=0, use_cache=True)
+        c = m.generate_simple(ids, pixel_values=pv, max_new_tokens=6, temperature=0, use_cache=False)
+        assert torch.equal(a, c), f"cached and cacheless generation diverged (image={with_image})"
+    # a prompt shorter than the GDN conv window must still fill a valid conv state
+    short = rand_batch(m.config, B=1, T=2)["input_ids"]
+    assert torch.equal(m.generate_simple(short, max_new_tokens=4, temperature=0),
+                       m.generate_simple(short, max_new_tokens=4, temperature=0, use_cache=False))
 
 
 def test_tiny_overfit_learns():

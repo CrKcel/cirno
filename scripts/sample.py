@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Quick generation for smoke tests (no KV/state cache: recomputes the prefix every step, so keep outputs short).
+"""Quick generation for smoke tests (decode goes through the model's KV/state cache).
 
     python scripts/sample.py --model runs/pretrain/final --raw --prompt "The capital of France is"
     python scripts/sample.py --model runs/sft/final --prompt "这张图里有什么？" --image cat.jpg

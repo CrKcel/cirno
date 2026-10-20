@@ -1,6 +1,5 @@
 # TODO
 
-- **KV / 状态缓存**：`generate_simple` 每步重算前缀，只适合冒烟测试；未接入 `GenerationMixin.generate()`。需补 GDN 的递推状态 + conv 状态缓存。
 - **端侧量化**
 - **身份与 persona**：`system` 预设已支持且不计损失，人设一致性与无人设时的身份分布由 `evals/persona.jsonl`
   覆盖（见 [evaluation.md](evaluation.md)）；仍缺身份注入模板。无预设时身份从语料随机采样、可能前后不一致，

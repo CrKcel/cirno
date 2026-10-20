@@ -164,7 +164,8 @@ def length_prior(args):
 # generation
 # ------------------------------------------------------------------------------------------------
 class Generator:
-    """One place where ids/texts cross the model boundary, so a cached decoder can replace it later."""
+    """One place where ids/texts cross the model boundary (generation runs through the model's
+    InferenceCache: prefill once, single-token decode steps after that)."""
 
     def __init__(self, model, tok, sp, device, dtype_ctx):
         self.model, self.tok, self.sp, self.device, self.dtype_ctx = model, tok, sp, device, dtype_ctx
@@ -278,8 +279,9 @@ def bench(gen, args, vc, model, load_s):
                 prompt_tokens=len(ids), prefill_ms=round(prefill * 1000, 1),
                 decode_tok_s=round(31 / decode, 1) if decode > 0 else None,
                 peak_mem_gb=round(torch.cuda.max_memory_allocated(device) / 1024 ** 3, 2) if cuda else None,
-                note="generate_simple recomputes the prefix every step, so this is a cacheless upper bound "
-                     "on decode cost; the on-device number needs the KV/state cache and the target device")
+                note="decode goes through generate_simple's KV/state cache (prefix processed once, one token "
+                     "per step after that); it is a real measurement but still of this machine - measure on "
+                     "the target device for on-device cost")
 
 
 def write_blind(args, gen, vc, out_dir):
